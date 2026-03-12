@@ -1085,19 +1085,21 @@ type ConnectionContext struct {
 	mu sync.RWMutex
 
 	// Crypto sessions
-	readCrypto      *CryptoSession
-	writeCrypto     *CryptoSession
-	handshakeCrypto *CryptoSession
+	readCrypto             *CryptoSession
+	writeCrypto            *CryptoSession
+	handshakeCrypto        *CryptoSession
+	handshakeReceiveCrypto *CryptoSession // staged receive cipher during renegotiation
 
 	// Compression session
 	compression *CompressionSession
 
 	// Connection state
-	sequence           uint64
-	closing            bool
-	handshakeDone      bool
-	handshakeStartTime time.Time
-	handshakeSequence  uint64
+	sequence                uint64
+	closing                 bool
+	handshakeDone           bool
+	handshakePendingConfirm bool // true when waiting for handshake confirm
+	handshakeStartTime      time.Time
+	handshakeSequence       uint64
 
 	// Supported algorithms
 	supportedCryptoAlgorithms      []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
@@ -1109,10 +1111,11 @@ type ConnectionContext struct {
 // NewConnectionContext creates a new connection context with default settings.
 func NewConnectionContext(keyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE) *ConnectionContext {
 	ret := &ConnectionContext{
-		readCrypto:      NewCryptoSession(),
-		writeCrypto:     NewCryptoSession(),
-		handshakeCrypto: NewCryptoSession(),
-		compression:     NewCompressionSession(),
+		readCrypto:             NewCryptoSession(),
+		writeCrypto:            NewCryptoSession(),
+		handshakeCrypto:        NewCryptoSession(),
+		handshakeReceiveCrypto: nil,
+		compression:            NewCompressionSession(),
 		supportedCryptoAlgorithms: []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM,
@@ -1387,6 +1390,7 @@ func (cc *ConnectionContext) HandshakeGenerateSelfKey(peerSequenceId uint64) err
 // HandshakeReadPeerKey reads the peer's public key and computes the shared secret.
 func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHandshakeData,
 	supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
+	needConfirm bool,
 ) error_code.ErrorType {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -1423,15 +1427,28 @@ func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHan
 		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_KDF_ERROR
 	}
 
-	// Set up read and write crypto sessions with the same key
-	if err := cc.readCrypto.SetKey(cc.handshakeCrypto.Key, cc.handshakeCrypto.IV, algorithm); err != nil {
-		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
-	}
+	// Set up write crypto session (always applied immediately)
 	if err := cc.writeCrypto.SetKey(cc.handshakeCrypto.Key, cc.handshakeCrypto.IV, algorithm); err != nil {
 		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
 	}
 
-	cc.handshakeDone = true
+	if needConfirm {
+		// Stage the receive cipher for later confirmation
+		cc.handshakeReceiveCrypto = NewCryptoSession()
+		if err := cc.handshakeReceiveCrypto.SetKey(cc.handshakeCrypto.Key, cc.handshakeCrypto.IV, algorithm); err != nil {
+			cc.handshakeReceiveCrypto = nil
+			return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
+		}
+		cc.handshakePendingConfirm = true
+	} else {
+		// Apply immediately (client side)
+		if err := cc.readCrypto.SetKey(cc.handshakeCrypto.Key, cc.handshakeCrypto.IV, algorithm); err != nil {
+			return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
+		}
+
+		cc.handshakeDone = true
+	}
+
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
@@ -1465,6 +1482,45 @@ func (cc *ConnectionContext) HandshakeWriteSelfPublicKey(
 	selfPubKey.PublicKey = pubKey
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+// ConfirmHandshake promotes the staged receive cipher to the active receive cipher.
+// This should be called after receiving a handshake_confirm from the peer.
+// If the handshakeSequence does not match or no confirm is pending, this is a no-op.
+func (cc *ConnectionContext) ConfirmHandshake(handshakeSequence uint64) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+
+	if cc.handshakeSequence != handshakeSequence || !cc.handshakePendingConfirm {
+		return
+	}
+
+	cc.readCrypto = cc.handshakeReceiveCrypto
+	cc.handshakeReceiveCrypto = nil
+	cc.handshakePendingConfirm = false
+
+	cc.handshakeDone = true
+}
+
+// GetHandshakePendingConfirm returns true if a handshake confirm is pending.
+func (cc *ConnectionContext) GetHandshakePendingConfirm() bool {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	return cc.handshakePendingConfirm
+}
+
+// GetHandshakeReceiveCrypto returns the staged receive crypto session (nil if none pending).
+func (cc *ConnectionContext) GetHandshakeReceiveCrypto() *CryptoSession {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	return cc.handshakeReceiveCrypto
+}
+
+// GetHandshakeSequence returns the current handshake sequence ID.
+func (cc *ConnectionContext) GetHandshakeSequence() uint64 {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	return cc.handshakeSequence
 }
 
 // UpdateCompressionAlgorithm updates the list of supported compression algorithms.
@@ -1523,7 +1579,8 @@ func allowCrypto(bodyType types.MessageBodyType) bool {
 	case types.MessageBodyTypeNodeRegisterReq,
 		types.MessageBodyTypeNodeRegisterRsp,
 		types.MessageBodyTypeNodePingReq,
-		types.MessageBodyTypeNodePongRsp:
+		types.MessageBodyTypeNodePongRsp,
+		types.MessageBodyTypeHandshakeConfirm:
 		return false
 	default:
 		return true

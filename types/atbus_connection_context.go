@@ -82,10 +82,21 @@ type ConnectionContext interface {
 	// Parameters:
 	//   - peerPubKey: the peer's handshake data containing public key
 	//   - supportedCryptoAlgorithms: list of locally supported crypto algorithms
+	//   - needConfirm: when true (server side), the new receive cipher is staged
+	//     in a pending state and not applied until ConfirmHandshake is called.
+	//     When false (client side), both send and receive ciphers are applied immediately.
 	//
 	// Returns error code, EN_ATBUS_ERR_SUCCESS on success.
 	HandshakeReadPeerKey(peerPubKey *protocol.CryptoHandshakeData,
-		supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE) ErrorType
+		supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
+		needConfirm bool) ErrorType
+
+	// ConfirmHandshake promotes the staged receive cipher (from a HandshakeReadPeerKey call
+	// with needConfirm=true) to the active receive cipher. This should be called after
+	// receiving a handshake_confirm message from the peer.
+	//
+	// If the handshakeSequence does not match or no confirm is pending, this is a no-op.
+	ConfirmHandshake(handshakeSequence uint64)
 
 	// HandshakeWriteSelfPublicKey writes the local public key to the handshake data structure.
 	//

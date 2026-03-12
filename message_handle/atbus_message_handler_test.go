@@ -161,8 +161,12 @@ func (c *mockConnectionContext) HandshakeGenerateSelfKey(peerSequenceId uint64) 
 
 func (c *mockConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHandshakeData,
 	supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
+	needConfirm bool,
 ) error_code.ErrorType {
 	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+func (c *mockConnectionContext) ConfirmHandshake(handshakeSequence uint64) {
 }
 
 func (c *mockConnectionContext) HandshakeWriteSelfPublicKey(

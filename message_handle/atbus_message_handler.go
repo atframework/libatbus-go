@@ -286,6 +286,7 @@ func buildHandleSet() *DispatchHandleSet {
 	ret.fns[types.MessageBodyTypeNodeRegisterRsp] = onRecvNodeRegisterRsp
 	ret.fns[types.MessageBodyTypeNodePingReq] = onRecvNodePing
 	ret.fns[types.MessageBodyTypeNodePongRsp] = onRecvNodePong
+	ret.fns[types.MessageBodyTypeHandshakeConfirm] = onRecvHandshakeConfirm
 	return ret
 }
 
@@ -1234,7 +1235,7 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 			}
 
 			resultCode = conn.GetConnectionContext().HandshakeReadPeerKey(regData.GetCryptoHandshake(),
-				n.GetConfigure().CryptoAllowAlgorithms)
+				n.GetConfigure().CryptoAllowAlgorithms, true)
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
 				return resultCode, nil
 			}
@@ -1325,10 +1326,13 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 		if conn.CheckFlag(types.ConnectionFlag_ClientMode) && regData.GetCryptoHandshake().GetSequence() != 0 &&
 			regData.GetCryptoHandshake().GetType() != protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
 			resultCode = conn.GetConnectionContext().HandshakeReadPeerKey(regData.GetCryptoHandshake(),
-				n.GetConfigure().CryptoAllowAlgorithms)
+				n.GetConfigure().CryptoAllowAlgorithms, false)
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
 				return resultCode, nil
 			}
+
+			// 发送 handshake_confirm 通知对端完成密钥切换
+			SendHandshakeConfirm(n, conn, regData.GetCryptoHandshake().GetSequence())
 		}
 
 		resultCode = conn.GetConnectionContext().UpdateCompressionAlgorithm(regData.GetSupportedCompressionAlgorithm())
@@ -1416,7 +1420,7 @@ func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int,
 			retCode = conn.GetConnectionContext().HandshakeGenerateSelfKey(body.GetCryptoHandshake().GetSequence())
 			if retCode == error_code.EN_ATBUS_ERR_SUCCESS {
 				retCode = conn.GetConnectionContext().HandshakeReadPeerKey(body.GetCryptoHandshake(),
-					n.GetConfigure().CryptoAllowAlgorithms)
+					n.GetConfigure().CryptoAllowAlgorithms, true)
 			}
 			if retCode != error_code.EN_ATBUS_ERR_SUCCESS {
 				n.LogError(ep, conn, int(retCode), retCode, "ping handshake refresh secret failed")
@@ -1478,12 +1482,15 @@ func onRecvNodePong(n types.Node, conn types.Connection, m *Message, status int,
 			body.GetCryptoHandshake().GetSequence() != 0 &&
 			body.GetCryptoHandshake().GetType() != protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
 			resultCode := conn.GetConnectionContext().HandshakeReadPeerKey(body.GetCryptoHandshake(),
-				n.GetConfigure().CryptoAllowAlgorithms)
+				n.GetConfigure().CryptoAllowAlgorithms, false)
 
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
 				n.LogError(getConnectionBinding(conn), conn, int(resultCode), resultCode,
 					fmt.Sprintf("node recv node_pong from %v handshake refresh secret failed", m.GetHead().GetSourceBusId()),
 				)
+			} else {
+				// 发送 handshake_confirm 通知对端完成密钥切换
+				SendHandshakeConfirm(n, conn, body.GetCryptoHandshake().GetSequence())
 			}
 		}
 
@@ -1498,6 +1505,57 @@ func onRecvNodePong(n types.Node, conn types.Connection, m *Message, status int,
 	}
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+func onRecvHandshakeConfirm(n types.Node, conn types.Connection, m *Message, status int, errcode error_code.ErrorType) error_code.ErrorType {
+	if lu.IsNil(n) {
+		return error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	body := m.GetBody().GetHandshakeConfirm()
+	if body == nil {
+		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+			fmt.Sprintf("node recv handshake_confirm from %v but without handshake_confirm data", m.GetHead().GetSourceBusId()),
+		)
+		if !lu.IsNil(conn) {
+			conn.AddStatFault()
+		}
+		return error_code.EN_ATBUS_ERR_BAD_DATA
+	}
+
+	// 必须已经注册完成的 connection 才能处理 handshake_confirm
+	if !lu.IsNil(conn) {
+		if !conn.CheckFlag(types.ConnectionFlag_Temporary) && lu.IsNil(conn.GetBinding()) {
+			n.LogError(nil, conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+				fmt.Sprintf("node recv handshake_confirm from %v but connection has no endpoint", m.GetHead().GetSourceBusId()),
+			)
+			conn.Reset()
+			return error_code.EN_ATBUS_ERR_BAD_DATA
+		}
+
+		conn.GetConnectionContext().ConfirmHandshake(body.GetSequence())
+	}
+
+	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+// SendHandshakeConfirm sends a handshake_confirm message to notify the peer
+// that the cipher renegotiation is complete on this end.
+func SendHandshakeConfirm(n types.Node, conn types.Connection, sequence uint64) error_code.ErrorType {
+	if lu.IsNil(n) || lu.IsNil(conn) {
+		return error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	responseM := types.NewMessage()
+	head := responseM.MutableHead()
+	confirmBody := responseM.MutableBody().MutableHandshakeConfirm()
+
+	head.Version = n.GetProtocolVersion()
+	head.Sequence = conn.GetConnectionContext().GetNextSequence()
+	head.SourceBusId = uint64(n.GetId())
+	confirmBody.Sequence = sequence
+
+	return SendMessage(n, conn, responseM)
 }
 
 func init() {

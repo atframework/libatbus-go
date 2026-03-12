@@ -2499,8 +2499,8 @@ func TestConnectionContextHandshakeReadPeerKey(t *testing.T) {
 		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeWriteSelfPublicKey(serverPubKey, supportedAlgorithms))
 
 		// Act - Read peer keys
-		clientErrCode := client.HandshakeReadPeerKey(serverPubKey, supportedAlgorithms)
-		serverErrCode := server.HandshakeReadPeerKey(clientPubKey, supportedAlgorithms)
+		clientErrCode := client.HandshakeReadPeerKey(serverPubKey, supportedAlgorithms, false)
+		serverErrCode := server.HandshakeReadPeerKey(clientPubKey, supportedAlgorithms, false)
 
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, clientErrCode)
@@ -2518,7 +2518,7 @@ func TestConnectionContextHandshakeReadPeerKey(t *testing.T) {
 		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ctx.HandshakeGenerateSelfKey(0))
 
 		// Act
-		errCode := ctx.HandshakeReadPeerKey(nil, nil)
+		errCode := ctx.HandshakeReadPeerKey(nil, nil, false)
 
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_PARAMS, errCode)
@@ -2535,7 +2535,7 @@ func TestConnectionContextHandshakeReadPeerKey(t *testing.T) {
 		}
 
 		// Act
-		errCode := ctx.HandshakeReadPeerKey(peerPubKey, nil)
+		errCode := ctx.HandshakeReadPeerKey(peerPubKey, nil, false)
 
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_READ_PEER_KEY, errCode)
@@ -2548,7 +2548,7 @@ func TestConnectionContextHandshakeReadPeerKey(t *testing.T) {
 		peerPubKey := &protocol.CryptoHandshakeData{}
 
 		// Act
-		errCode := ctx.HandshakeReadPeerKey(peerPubKey, nil)
+		errCode := ctx.HandshakeReadPeerKey(peerPubKey, nil, false)
 
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING, errCode)
@@ -2736,3 +2736,311 @@ func TestConnectionContextConcurrentHandshake(t *testing.T) {
 // - Corrupted compressed payloads for each algorithm: covered indirectly via invalid-size checks, but
 //   not exhaustively enumerated per algorithm to avoid excessive test data.
 // - XXTEA compression+encryption: XXTEA encryption is not implemented in Go yet.
+
+// TestConnectionContextKeyRenegotiationFlow tests the full key renegotiation flow.
+//
+// This is the Go equivalent of the C++ test case:
+//
+//	atbus_connection_context_test.key_renegotiation_flow
+//
+// Flow:
+//  1. Initial handshake (register_req/register_rsp): both sides establish ciphers.
+//  2. Key renegotiation: client sends new handshake (simulating ping), server processes
+//     with needConfirm=true → server stages new receive cipher.
+//  3. Intermediate state: server send=NEW, receive=OLD; client send=OLD, receive=OLD.
+//  4. Client processes pong (needConfirm=false) → client send=NEW, receive=NEW.
+//  5. Server confirms handshake → server send=NEW, receive=NEW.
+//  6. Both sides communicate with new keys.
+func TestConnectionContextKeyRenegotiationFlow(t *testing.T) {
+	supportedAlgorithms := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
+	}
+
+	keyExchangeTypes := []protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE{
+		protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519,
+		protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_SECP256R1,
+	}
+
+	for _, keyExchange := range keyExchangeTypes {
+		t.Run(keyExchangeString(keyExchange), func(t *testing.T) {
+			testKeyRenegotiationFlow(t, keyExchange, supportedAlgorithms)
+		})
+	}
+}
+
+func testKeyRenegotiationFlow(
+	t *testing.T,
+	keyExchange protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE,
+	supportedAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
+) {
+	// Arrange
+	serverCtx := NewConnectionContext(keyExchange)
+	clientCtx := NewConnectionContext(keyExchange)
+
+	// Before handshake, no ciphers should be initialized
+	assert.False(t, serverCtx.GetWriteCrypto().IsInitialized())
+	assert.False(t, serverCtx.GetReadCrypto().IsInitialized())
+	assert.False(t, clientCtx.GetWriteCrypto().IsInitialized())
+	assert.False(t, clientCtx.GetReadCrypto().IsInitialized())
+	assert.Nil(t, serverCtx.GetHandshakeReceiveCrypto())
+	assert.False(t, serverCtx.GetHandshakePendingConfirm())
+
+	// ====================================================================
+	// Phase 1: Initial handshake (register_req/register_rsp flow)
+	// ====================================================================
+	t.Log("Phase 1: Initial handshake")
+
+	// Client generates key pair (simulating register_req)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, clientCtx.HandshakeGenerateSelfKey(0))
+
+	clientPubKey := &protocol.CryptoHandshakeData{}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		clientCtx.HandshakeWriteSelfPublicKey(clientPubKey, supportedAlgorithms))
+
+	// Server processes register_req (needConfirm=true)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeGenerateSelfKey(clientPubKey.GetSequence()))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeReadPeerKey(clientPubKey, supportedAlgorithms, true))
+
+	// After server handshake_read_peer_key(needConfirm=true):
+	//   writeCrypto is set (new send cipher)
+	//   readCrypto should NOT be updated yet (still old/uninitialized)
+	//   handshakeReceiveCrypto holds the new receive cipher pending confirm
+	assert.True(t, serverCtx.GetWriteCrypto().IsInitialized())
+	assert.False(t, serverCtx.GetReadCrypto().IsInitialized())
+	assert.NotNil(t, serverCtx.GetHandshakeReceiveCrypto())
+	assert.True(t, serverCtx.GetHandshakePendingConfirm())
+
+	serverPubKey := &protocol.CryptoHandshakeData{}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeWriteSelfPublicKey(serverPubKey, supportedAlgorithms))
+	initialSequence := serverPubKey.GetSequence()
+
+	// Client processes register_rsp (needConfirm=false → both ciphers applied immediately)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		clientCtx.HandshakeReadPeerKey(serverPubKey, supportedAlgorithms, false))
+
+	assert.True(t, clientCtx.GetWriteCrypto().IsInitialized())
+	assert.True(t, clientCtx.GetReadCrypto().IsInitialized())
+	assert.False(t, clientCtx.GetHandshakePendingConfirm())
+
+	// Server confirms initial handshake
+	serverCtx.ConfirmHandshake(initialSequence)
+
+	// After confirm: server readCrypto should now be set
+	assert.True(t, serverCtx.GetReadCrypto().IsInitialized())
+	assert.Nil(t, serverCtx.GetHandshakeReceiveCrypto())
+	assert.False(t, serverCtx.GetHandshakePendingConfirm())
+
+	// Record initial cipher keys for later comparison
+	initialServerWriteKey := make([]byte, len(serverCtx.writeCrypto.Key))
+	copy(initialServerWriteKey, serverCtx.writeCrypto.Key)
+	initialServerReadKey := make([]byte, len(serverCtx.readCrypto.Key))
+	copy(initialServerReadKey, serverCtx.readCrypto.Key)
+	initialClientWriteKey := make([]byte, len(clientCtx.writeCrypto.Key))
+	copy(initialClientWriteKey, clientCtx.writeCrypto.Key)
+	initialClientReadKey := make([]byte, len(clientCtx.readCrypto.Key))
+	copy(initialClientReadKey, clientCtx.readCrypto.Key)
+
+	// Verify initial bidirectional communication with content check
+	verifyPackUnpack(t, clientCtx, serverCtx, "initial client to server")
+	verifyPackUnpack(t, serverCtx, clientCtx, "initial server to client")
+
+	// ====================================================================
+	// Phase 2: Key renegotiation (simulating ping/pong with crypto handshake)
+	//   Client sends ping with new handshake data, server processes it
+	// ====================================================================
+	t.Log("Phase 2: Key renegotiation - server processes ping handshake")
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, clientCtx.HandshakeGenerateSelfKey(0))
+
+	clientRenegPubKey := &protocol.CryptoHandshakeData{}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		clientCtx.HandshakeWriteSelfPublicKey(clientRenegPubKey, supportedAlgorithms))
+
+	// Server processes ping handshake (needConfirm=true)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeGenerateSelfKey(clientRenegPubKey.GetSequence()))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeReadPeerKey(clientRenegPubKey, supportedAlgorithms, true))
+
+	// After renegotiation handshake_read_peer_key(needConfirm=true):
+	//   writeCrypto key should have changed (new send cipher)
+	//   readCrypto key should still be the OLD key
+	//   handshakeReceiveCrypto should hold the new receive cipher pending confirm
+	assert.NotEqual(t, initialServerWriteKey, serverCtx.writeCrypto.Key)
+	assert.Equal(t, initialServerReadKey, serverCtx.readCrypto.Key)
+	assert.NotNil(t, serverCtx.GetHandshakeReceiveCrypto())
+	assert.True(t, serverCtx.GetHandshakePendingConfirm())
+
+	serverRenegPubKey := &protocol.CryptoHandshakeData{}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		serverCtx.HandshakeWriteSelfPublicKey(serverRenegPubKey, supportedAlgorithms))
+	renegSequence := serverRenegPubKey.GetSequence()
+
+	// ====================================================================
+	// Phase 3: Intermediate state - server processed, client hasn't
+	//   Server: send=NEW, receive=OLD.  Client: send=OLD, receive=OLD.
+	// ====================================================================
+	t.Log("Phase 3: Intermediate - client sends with OLD key, server receives with OLD key")
+
+	// Client cipher keys should still be the initial ones (not yet processed pong)
+	assert.Equal(t, initialClientWriteKey, clientCtx.writeCrypto.Key)
+	assert.Equal(t, initialClientReadKey, clientCtx.readCrypto.Key)
+
+	// 3a: Client sends data with OLD key → server decrypts with OLD receive → OK
+	verifyPackUnpack(t, clientCtx, serverCtx, "client data during renegotiation (old key)")
+
+	// 3b: Server sends data with NEW key → save for client to decrypt after pong
+	serverDataDuringReneg := packMessage(t, serverCtx, "server data during renegotiation (new key)")
+
+	// ====================================================================
+	// Phase 4: Client processes pong handshake
+	//   Server: send=NEW, receive=OLD.  Client: send=NEW, receive=NEW.
+	// ====================================================================
+	t.Log("Phase 4: Client processes pong response")
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+		clientCtx.HandshakeReadPeerKey(serverRenegPubKey, supportedAlgorithms, false))
+
+	// After client processes pong (needConfirm=false): both ciphers should have changed
+	assert.NotEqual(t, initialClientWriteKey, clientCtx.writeCrypto.Key)
+	assert.NotEqual(t, initialClientReadKey, clientCtx.readCrypto.Key)
+
+	// 4a: Client decrypts server data from phase 3b with NEW receive → OK
+	unpackAndVerify(t, clientCtx, serverDataDuringReneg, "server data during renegotiation (new key)")
+
+	// 4b: Client sends data with NEW key → server can't decrypt yet (receive=OLD)
+	clientDataNewKey := packMessage(t, clientCtx, "client data with new key (pre-confirm)")
+	{
+		recvMsg := types.NewMessage()
+		errCode := serverCtx.UnpackMessage(recvMsg, clientDataNewKey, 1024*1024)
+		assert.NotEqual(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode,
+			"Server should fail to unpack client data encrypted with NEW key before confirm")
+	}
+
+	// ====================================================================
+	// Phase 5: Server confirms handshake (simulating on_recv_handshake_confirm)
+	//   Server: send=NEW, receive=NEW.  Client: send=NEW, receive=NEW.
+	// ====================================================================
+	t.Log("Phase 5: Server confirms, both sides use new keys")
+
+	// Before confirm: server readCrypto key is still the OLD key
+	assert.Equal(t, initialServerReadKey, serverCtx.readCrypto.Key)
+	assert.True(t, serverCtx.GetHandshakePendingConfirm())
+
+	serverCtx.ConfirmHandshake(renegSequence)
+
+	// After confirm: server readCrypto should have changed to the new key
+	assert.NotEqual(t, initialServerReadKey, serverCtx.readCrypto.Key)
+	assert.Nil(t, serverCtx.GetHandshakeReceiveCrypto())
+	assert.False(t, serverCtx.GetHandshakePendingConfirm())
+
+	// All cipher keys should be different from the initial ones
+	assert.NotEqual(t, initialServerWriteKey, serverCtx.writeCrypto.Key)
+	assert.NotEqual(t, initialServerReadKey, serverCtx.readCrypto.Key)
+	assert.NotEqual(t, initialClientWriteKey, clientCtx.writeCrypto.Key)
+	assert.NotEqual(t, initialClientReadKey, clientCtx.readCrypto.Key)
+
+	// 5a: Server can now process client's data encrypted with NEW key
+	unpackAndVerify(t, serverCtx, clientDataNewKey, "client data with new key (pre-confirm)")
+
+	// 5b: Full bidirectional communication with new keys
+	verifyPackUnpack(t, clientCtx, serverCtx, "post renegotiation client to server")
+	verifyPackUnpack(t, serverCtx, clientCtx, "post renegotiation server to client")
+
+	t.Log("Key renegotiation test PASSED")
+}
+
+func TestConfirmHandshakeEdgeCases(t *testing.T) {
+	// Test: ConfirmHandshake with mismatched sequence is a no-op
+	t.Run("MismatchedSequence_NoOp", func(t *testing.T) {
+		// Arrange
+		serverCtx := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519)
+		clientCtx := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519)
+
+		supportedAlgorithms := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{
+			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
+		}
+
+		// Perform initial handshake and renegotiation to get pending confirm
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, clientCtx.HandshakeGenerateSelfKey(0))
+		clientPubKey := &protocol.CryptoHandshakeData{}
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+			clientCtx.HandshakeWriteSelfPublicKey(clientPubKey, supportedAlgorithms))
+
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+			serverCtx.HandshakeGenerateSelfKey(clientPubKey.GetSequence()))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS,
+			serverCtx.HandshakeReadPeerKey(clientPubKey, supportedAlgorithms, true))
+
+		assert.True(t, serverCtx.GetHandshakePendingConfirm())
+
+		// Act - Confirm with wrong sequence
+		serverCtx.ConfirmHandshake(99999)
+
+		// Assert - Still pending
+		assert.True(t, serverCtx.GetHandshakePendingConfirm())
+		assert.NotNil(t, serverCtx.GetHandshakeReceiveCrypto())
+	})
+
+	// Test: ConfirmHandshake when no confirm is pending is a no-op
+	t.Run("NoPendingConfirm_NoOp", func(t *testing.T) {
+		// Arrange
+		ctx := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519)
+		assert.False(t, ctx.GetHandshakePendingConfirm())
+
+		// Act - Should not panic or change state
+		ctx.ConfirmHandshake(12345)
+
+		// Assert
+		assert.False(t, ctx.GetHandshakePendingConfirm())
+		assert.Nil(t, ctx.GetHandshakeReceiveCrypto())
+	})
+}
+
+// packMessage packs a forward_data message with the given content and returns the packed bytes.
+func packMessage(t *testing.T, ctx *ConnectionContext, content string) []byte {
+	t.Helper()
+	msg := types.NewMessage()
+	msg.MutableHead().SourceBusId = 12345
+	msg.MutableBody().MessageType = &protocol.MessageBody_DataTransformReq{
+		DataTransformReq: &protocol.ForwardData{
+			Content: []byte(content),
+		},
+	}
+
+	packed, errCode := ctx.PackMessage(msg, 3, 1024*1024)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
+	require.NotNil(t, packed)
+
+	result := make([]byte, packed.Used())
+	copy(result, packed.UsedSpan())
+	return result
+}
+
+// unpackAndVerify unpacks data and verifies the content matches expected.
+func unpackAndVerify(t *testing.T, ctx *ConnectionContext, data []byte, expectedContent string) {
+	t.Helper()
+	recvMsg := types.NewMessage()
+	errCode := ctx.UnpackMessage(recvMsg, data, 1024*1024)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode,
+		"Failed to unpack message, expected content: %s", expectedContent)
+
+	recvBody := recvMsg.GetBody()
+	require.NotNil(t, recvBody)
+
+	recvContent := recvBody.GetDataTransformReq().GetContent()
+	assert.Equal(t, []byte(expectedContent), recvContent)
+}
+
+// verifyPackUnpack packs a message on sender side and unpacks it on receiver side,
+// verifying the content is preserved.
+func verifyPackUnpack(t *testing.T, sender *ConnectionContext, receiver *ConnectionContext, content string) {
+	t.Helper()
+	data := packMessage(t, sender, content)
+	unpackAndVerify(t, receiver, data, content)
+}

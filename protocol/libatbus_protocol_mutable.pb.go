@@ -1417,6 +1417,85 @@ func (m *RegisterData) MutableCryptoHandshake() *CryptoHandshakeData {
 	return m.CryptoHandshake
 }
 
+// ===== Clone methods for HandshakeConfirmData ===== Message ====
+func (m *HandshakeConfirmData) Clone() *HandshakeConfirmData {
+	if m == nil {
+		return new(HandshakeConfirmData)
+	}
+	return proto.Clone(m).(*HandshakeConfirmData)
+}
+
+// ===== Merge methods for HandshakeConfirmData ===== Message ====
+func (m *HandshakeConfirmData) Merge(src *HandshakeConfirmData) {
+	if m == nil {
+		return
+	}
+	proto.Merge(m, src)
+}
+
+// ===== SlogValue methods for HandshakeConfirmData ===== Message ====
+func (m *HandshakeConfirmData) LogValue() slog.Value {
+	return slog.StringValue(pu.MessageReadableTextIndent(m))
+}
+
+// ===== GetMessageReflectType methods for HandshakeConfirmData ===== Message =====
+func (_ *HandshakeConfirmData) GetTypeID() lu.TypeID {
+	return lu.GetTypeIDOf[HandshakeConfirmData]()
+}
+
+// ===== Readonly wrapper for HandshakeConfirmData ===== Message ====
+type Readonly_HandshakeConfirmData struct {
+	protoData     *HandshakeConfirmData
+	fieldSequence uint64
+}
+
+func (r *Readonly_HandshakeConfirmData) ReadonlyProtoReflect() innerFile_libatbus_protocol_protoReadonlyMessage {
+	if r == nil || r.protoData == nil {
+		return nil
+	}
+	return r.protoData.ProtoReflect()
+}
+
+func (m *HandshakeConfirmData) ToReadonly() *Readonly_HandshakeConfirmData {
+	if m == nil {
+		return nil
+	}
+	clone := m.Clone()
+	ro := &Readonly_HandshakeConfirmData{protoData: clone}
+	ro.initFromProto(clone)
+	return ro
+}
+
+func (r *Readonly_HandshakeConfirmData) CloneMessage() *HandshakeConfirmData {
+	if r == nil {
+		return new(HandshakeConfirmData)
+	}
+	return r.protoData.Clone()
+}
+
+func (r *Readonly_HandshakeConfirmData) ToMessage() *HandshakeConfirmData {
+	return r.CloneMessage()
+}
+
+func (r Readonly_HandshakeConfirmData) LogValue() slog.Value {
+	return r.protoData.LogValue()
+}
+
+func (r *Readonly_HandshakeConfirmData) initFromProto(src *HandshakeConfirmData) {
+	if r == nil || src == nil {
+		return
+	}
+	r.fieldSequence = src.GetSequence()
+}
+
+func (r *Readonly_HandshakeConfirmData) GetSequence() uint64 {
+	if r == nil {
+		var zero uint64
+		return zero
+	}
+	return r.fieldSequence
+}
+
 // ===== Clone methods for MessageHeadCrypto ===== Message ====
 func (m *MessageHeadCrypto) Clone() *MessageHeadCrypto {
 	if m == nil {
@@ -1913,6 +1992,12 @@ func (r *Readonly_MessageBody) initFromProto(src *MessageBody) {
 			inner = nested.ToReadonly()
 		}
 		r.fieldMessageType = &Readonly_MessageBody_NodePongRsp{value: inner}
+	case *MessageBody_HandshakeConfirm:
+		var inner *Readonly_HandshakeConfirmData
+		if nested := v.HandshakeConfirm; nested != nil {
+			inner = nested.ToReadonly()
+		}
+		r.fieldMessageType = &Readonly_MessageBody_HandshakeConfirm{value: inner}
 	default:
 		r.fieldMessageType = nil
 	}
@@ -2011,6 +2096,18 @@ func (r *Readonly_MessageBody) GetNodePongRsp() *Readonly_PingData {
 		return x.GetNodePongRsp()
 	}
 	var zero *Readonly_PingData
+	return zero
+}
+
+func (r *Readonly_MessageBody) GetHandshakeConfirm() *Readonly_HandshakeConfirmData {
+	if r == nil {
+		var zero *Readonly_HandshakeConfirmData
+		return zero
+	}
+	if x, ok := r.fieldMessageType.(*Readonly_MessageBody_HandshakeConfirm); ok && x != nil {
+		return x.GetHandshakeConfirm()
+	}
+	var zero *Readonly_HandshakeConfirmData
 	return zero
 }
 
@@ -2208,19 +2305,41 @@ func (r *Readonly_MessageBody_NodePongRsp) GetNodePongRsp() *Readonly_PingData {
 	return r.value
 }
 
+// ===== Readonly struct for MessageBody_HandshakeConfirm ===== Oneof option ====
+type Readonly_MessageBody_HandshakeConfirm struct {
+	value *Readonly_HandshakeConfirmData
+}
+
+func (r *Readonly_MessageBody_HandshakeConfirm) GetMessageBody_MessageType() MessageBody_EnMessageTypeID {
+	return MessageBody_EnMessageTypeID_HandshakeConfirm
+}
+
+func (r *Readonly_MessageBody_HandshakeConfirm) GetTypeIDMessageBody_MessageType() lu.TypeID {
+	return GetTypeIDMessageBody_HandshakeConfirm()
+}
+
+func (r *Readonly_MessageBody_HandshakeConfirm) GetHandshakeConfirm() *Readonly_HandshakeConfirmData {
+	if r == nil {
+		var zero *Readonly_HandshakeConfirmData
+		return zero
+	}
+	return r.value
+}
+
 // ===== Case Enum for MessageBody Oneof MessageType ===== Oneof =====
 type MessageBody_EnMessageTypeID int32
 
 const (
-	MessageBody_EnMessageTypeID_NONE             MessageBody_EnMessageTypeID = 0  // none
-	MessageBody_EnMessageTypeID_CustomCommandReq MessageBody_EnMessageTypeID = 11 // custom_command_req
-	MessageBody_EnMessageTypeID_CustomCommandRsp MessageBody_EnMessageTypeID = 12 // custom_command_rsp
-	MessageBody_EnMessageTypeID_DataTransformReq MessageBody_EnMessageTypeID = 13 // data_transform_req
-	MessageBody_EnMessageTypeID_DataTransformRsp MessageBody_EnMessageTypeID = 14 // data_transform_rsp
-	MessageBody_EnMessageTypeID_NodeRegisterReq  MessageBody_EnMessageTypeID = 17 // node_register_req
-	MessageBody_EnMessageTypeID_NodeRegisterRsp  MessageBody_EnMessageTypeID = 18 // node_register_rsp
-	MessageBody_EnMessageTypeID_NodePingReq      MessageBody_EnMessageTypeID = 21 // node_ping_req
-	MessageBody_EnMessageTypeID_NodePongRsp      MessageBody_EnMessageTypeID = 22 // node_pong_rsp
+	MessageBody_EnMessageTypeID_NONE             MessageBody_EnMessageTypeID = 0 // none
+	MessageBody_EnMessageTypeID_CustomCommandReq MessageBody_EnMessageTypeID = 1 // custom_command_req
+	MessageBody_EnMessageTypeID_CustomCommandRsp MessageBody_EnMessageTypeID = 2 // custom_command_rsp
+	MessageBody_EnMessageTypeID_DataTransformReq MessageBody_EnMessageTypeID = 3 // data_transform_req
+	MessageBody_EnMessageTypeID_DataTransformRsp MessageBody_EnMessageTypeID = 4 // data_transform_rsp
+	MessageBody_EnMessageTypeID_NodeRegisterReq  MessageBody_EnMessageTypeID = 5 // node_register_req
+	MessageBody_EnMessageTypeID_NodeRegisterRsp  MessageBody_EnMessageTypeID = 6 // node_register_rsp
+	MessageBody_EnMessageTypeID_NodePingReq      MessageBody_EnMessageTypeID = 7 // node_ping_req
+	MessageBody_EnMessageTypeID_NodePongRsp      MessageBody_EnMessageTypeID = 8 // node_pong_rsp
+	MessageBody_EnMessageTypeID_HandshakeConfirm MessageBody_EnMessageTypeID = 9 // handshake_confirm
 )
 
 // ===== GetCase interface for MessageBody Oneof MessageType ===== Oneof =====
@@ -2559,4 +2678,41 @@ func (m *MessageBody_NodePongRsp) GetTypeIDMessageBody_MessageType() lu.TypeID {
 }
 func (m *MessageBody_NodePongRsp) GetFieldNameMessageBody_MessageType() string {
 	return "node_pong_rsp"
+}
+
+// ===== Mutable methods for MessageBody ===== Oneof =====
+func (m *MessageBody) MutableHandshakeConfirm() *HandshakeConfirmData {
+	if x, ok := m.MessageType.(*MessageBody_HandshakeConfirm); ok {
+		return x.MutableHandshakeConfirm()
+	}
+	x := new(MessageBody_HandshakeConfirm)
+	m.MessageType = x
+	return x.MutableHandshakeConfirm()
+}
+
+// ===== Get reflect Type for MessageBody Oneof MessageType ===== Oneof =====
+func GetTypeIDMessageBody_HandshakeConfirm() lu.TypeID {
+	return lu.GetTypeIDOf[MessageBody_HandshakeConfirm]()
+}
+func (_ *MessageBody_HandshakeConfirm) GetTypeID() lu.TypeID {
+	return lu.GetTypeIDOf[MessageBody_HandshakeConfirm]()
+}
+
+// ===== Mutable Message method for MessageBody Oneof MessageBody_HandshakeConfirm ===== Oneof =====
+func (m *MessageBody_HandshakeConfirm) MutableHandshakeConfirm() *HandshakeConfirmData {
+	if m.HandshakeConfirm == nil {
+		m.HandshakeConfirm = new(HandshakeConfirmData)
+	}
+	return m.HandshakeConfirm
+}
+
+// ===== Oneof Interface for MessageBody Oneof MessageBody_HandshakeConfirm ===== Oneof =====
+func (m *MessageBody_HandshakeConfirm) GetMessageBody_MessageType() MessageBody_EnMessageTypeID {
+	return MessageBody_EnMessageTypeID_HandshakeConfirm
+}
+func (m *MessageBody_HandshakeConfirm) GetTypeIDMessageBody_MessageType() lu.TypeID {
+	return lu.GetTypeIDOf[MessageBody_HandshakeConfirm]()
+}
+func (m *MessageBody_HandshakeConfirm) GetFieldNameMessageBody_MessageType() string {
+	return "handshake_confirm"
 }

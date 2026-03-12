@@ -405,7 +405,7 @@ const (
 	//
 	// 典型映射：
 	//
-	//	zstd   : level -1
+	//	zstd   : level 1（或 0）
 	//	lz4    : fast(1)
 	//	snappy : 默认配置
 	//	zlib   : level 1
@@ -797,8 +797,6 @@ type AccessData struct {
 	// access_token="<timestamp>:<nonce1>-<nonce2>:<custom_command_data.from>:{hex(sha256_lower_case(custom_command_data.commands.arg))}"
 	// abs(timestamp-current time)<=300
 	// access_token must be lower than 32KB
-	// signature=HMAC.sha256(access_token)
-	// 通过配置 access_token 并在节点注册和自定义命令中验证 access_data 来防止中间人攻击和重放攻击
 	Signature     [][]byte `protobuf:"bytes,9,rep,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1081,6 +1079,50 @@ func (x *RegisterData) GetCryptoHandshake() *CryptoHandshakeData {
 	return nil
 }
 
+type HandshakeConfirmData struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sequence      uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"` // used to prevent duplication
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HandshakeConfirmData) Reset() {
+	*x = HandshakeConfirmData{}
+	mi := &file_libatbus_protocol_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandshakeConfirmData) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandshakeConfirmData) ProtoMessage() {}
+
+func (x *HandshakeConfirmData) ProtoReflect() protoreflect.Message {
+	mi := &file_libatbus_protocol_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandshakeConfirmData.ProtoReflect.Descriptor instead.
+func (*HandshakeConfirmData) Descriptor() ([]byte, []int) {
+	return file_libatbus_protocol_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *HandshakeConfirmData) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
 type MessageHeadCrypto struct {
 	state     protoimpl.MessageState      `protogen:"open.v1"`
 	Algorithm ATBUS_CRYPTO_ALGORITHM_TYPE `protobuf:"varint,1,opt,name=algorithm,proto3,enum=atframework.atbus.protocol.ATBUS_CRYPTO_ALGORITHM_TYPE" json:"algorithm,omitempty"`
@@ -1095,7 +1137,7 @@ type MessageHeadCrypto struct {
 
 func (x *MessageHeadCrypto) Reset() {
 	*x = MessageHeadCrypto{}
-	mi := &file_libatbus_protocol_proto_msgTypes[8]
+	mi := &file_libatbus_protocol_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1107,7 +1149,7 @@ func (x *MessageHeadCrypto) String() string {
 func (*MessageHeadCrypto) ProtoMessage() {}
 
 func (x *MessageHeadCrypto) ProtoReflect() protoreflect.Message {
-	mi := &file_libatbus_protocol_proto_msgTypes[8]
+	mi := &file_libatbus_protocol_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1120,7 +1162,7 @@ func (x *MessageHeadCrypto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageHeadCrypto.ProtoReflect.Descriptor instead.
 func (*MessageHeadCrypto) Descriptor() ([]byte, []int) {
-	return file_libatbus_protocol_proto_rawDescGZIP(), []int{8}
+	return file_libatbus_protocol_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *MessageHeadCrypto) GetAlgorithm() ATBUS_CRYPTO_ALGORITHM_TYPE {
@@ -1154,7 +1196,7 @@ type MessageHeadCompression struct {
 
 func (x *MessageHeadCompression) Reset() {
 	*x = MessageHeadCompression{}
-	mi := &file_libatbus_protocol_proto_msgTypes[9]
+	mi := &file_libatbus_protocol_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1166,7 +1208,7 @@ func (x *MessageHeadCompression) String() string {
 func (*MessageHeadCompression) ProtoMessage() {}
 
 func (x *MessageHeadCompression) ProtoReflect() protoreflect.Message {
-	mi := &file_libatbus_protocol_proto_msgTypes[9]
+	mi := &file_libatbus_protocol_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1179,7 +1221,7 @@ func (x *MessageHeadCompression) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageHeadCompression.ProtoReflect.Descriptor instead.
 func (*MessageHeadCompression) Descriptor() ([]byte, []int) {
-	return file_libatbus_protocol_proto_rawDescGZIP(), []int{9}
+	return file_libatbus_protocol_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *MessageHeadCompression) GetType() ATBUS_COMPRESSION_ALGORITHM_TYPE {
@@ -1215,7 +1257,7 @@ type MessageHead struct {
 
 func (x *MessageHead) Reset() {
 	*x = MessageHead{}
-	mi := &file_libatbus_protocol_proto_msgTypes[10]
+	mi := &file_libatbus_protocol_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1227,7 +1269,7 @@ func (x *MessageHead) String() string {
 func (*MessageHead) ProtoMessage() {}
 
 func (x *MessageHead) ProtoReflect() protoreflect.Message {
-	mi := &file_libatbus_protocol_proto_msgTypes[10]
+	mi := &file_libatbus_protocol_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +1282,7 @@ func (x *MessageHead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageHead.ProtoReflect.Descriptor instead.
 func (*MessageHead) Descriptor() ([]byte, []int) {
-	return file_libatbus_protocol_proto_rawDescGZIP(), []int{10}
+	return file_libatbus_protocol_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *MessageHead) GetVersion() int32 {
@@ -1311,6 +1353,7 @@ type MessageBody struct {
 	//	*MessageBody_NodeRegisterRsp
 	//	*MessageBody_NodePingReq
 	//	*MessageBody_NodePongRsp
+	//	*MessageBody_HandshakeConfirm
 	MessageType   isMessageBody_MessageType `protobuf_oneof:"message_type"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1318,7 +1361,7 @@ type MessageBody struct {
 
 func (x *MessageBody) Reset() {
 	*x = MessageBody{}
-	mi := &file_libatbus_protocol_proto_msgTypes[11]
+	mi := &file_libatbus_protocol_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1330,7 +1373,7 @@ func (x *MessageBody) String() string {
 func (*MessageBody) ProtoMessage() {}
 
 func (x *MessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_libatbus_protocol_proto_msgTypes[11]
+	mi := &file_libatbus_protocol_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1343,7 +1386,7 @@ func (x *MessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageBody.ProtoReflect.Descriptor instead.
 func (*MessageBody) Descriptor() ([]byte, []int) {
-	return file_libatbus_protocol_proto_rawDescGZIP(), []int{11}
+	return file_libatbus_protocol_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *MessageBody) GetMessageType() isMessageBody_MessageType {
@@ -1425,40 +1468,53 @@ func (x *MessageBody) GetNodePongRsp() *PingData {
 	return nil
 }
 
+func (x *MessageBody) GetHandshakeConfirm() *HandshakeConfirmData {
+	if x != nil {
+		if x, ok := x.MessageType.(*MessageBody_HandshakeConfirm); ok {
+			return x.HandshakeConfirm
+		}
+	}
+	return nil
+}
+
 type isMessageBody_MessageType interface {
 	isMessageBody_MessageType()
 }
 
 type MessageBody_CustomCommandReq struct {
-	CustomCommandReq *CustomCommandData `protobuf:"bytes,11,opt,name=custom_command_req,json=customCommandReq,proto3,oneof"`
+	CustomCommandReq *CustomCommandData `protobuf:"bytes,1,opt,name=custom_command_req,json=customCommandReq,proto3,oneof"`
 }
 
 type MessageBody_CustomCommandRsp struct {
-	CustomCommandRsp *CustomCommandData `protobuf:"bytes,12,opt,name=custom_command_rsp,json=customCommandRsp,proto3,oneof"`
+	CustomCommandRsp *CustomCommandData `protobuf:"bytes,2,opt,name=custom_command_rsp,json=customCommandRsp,proto3,oneof"`
 }
 
 type MessageBody_DataTransformReq struct {
-	DataTransformReq *ForwardData `protobuf:"bytes,13,opt,name=data_transform_req,json=dataTransformReq,proto3,oneof"`
+	DataTransformReq *ForwardData `protobuf:"bytes,3,opt,name=data_transform_req,json=dataTransformReq,proto3,oneof"`
 }
 
 type MessageBody_DataTransformRsp struct {
-	DataTransformRsp *ForwardData `protobuf:"bytes,14,opt,name=data_transform_rsp,json=dataTransformRsp,proto3,oneof"`
+	DataTransformRsp *ForwardData `protobuf:"bytes,4,opt,name=data_transform_rsp,json=dataTransformRsp,proto3,oneof"`
 }
 
 type MessageBody_NodeRegisterReq struct {
-	NodeRegisterReq *RegisterData `protobuf:"bytes,17,opt,name=node_register_req,json=nodeRegisterReq,proto3,oneof"`
+	NodeRegisterReq *RegisterData `protobuf:"bytes,5,opt,name=node_register_req,json=nodeRegisterReq,proto3,oneof"`
 }
 
 type MessageBody_NodeRegisterRsp struct {
-	NodeRegisterRsp *RegisterData `protobuf:"bytes,18,opt,name=node_register_rsp,json=nodeRegisterRsp,proto3,oneof"`
+	NodeRegisterRsp *RegisterData `protobuf:"bytes,6,opt,name=node_register_rsp,json=nodeRegisterRsp,proto3,oneof"`
 }
 
 type MessageBody_NodePingReq struct {
-	NodePingReq *PingData `protobuf:"bytes,21,opt,name=node_ping_req,json=nodePingReq,proto3,oneof"`
+	NodePingReq *PingData `protobuf:"bytes,7,opt,name=node_ping_req,json=nodePingReq,proto3,oneof"`
 }
 
 type MessageBody_NodePongRsp struct {
-	NodePongRsp *PingData `protobuf:"bytes,22,opt,name=node_pong_rsp,json=nodePongRsp,proto3,oneof"`
+	NodePongRsp *PingData `protobuf:"bytes,8,opt,name=node_pong_rsp,json=nodePongRsp,proto3,oneof"`
+}
+
+type MessageBody_HandshakeConfirm struct {
+	HandshakeConfirm *HandshakeConfirmData `protobuf:"bytes,9,opt,name=handshake_confirm,json=handshakeConfirm,proto3,oneof"`
 }
 
 func (*MessageBody_CustomCommandReq) isMessageBody_MessageType() {}
@@ -1476,6 +1532,8 @@ func (*MessageBody_NodeRegisterRsp) isMessageBody_MessageType() {}
 func (*MessageBody_NodePingReq) isMessageBody_MessageType() {}
 
 func (*MessageBody_NodePongRsp) isMessageBody_MessageType() {}
+
+func (*MessageBody_HandshakeConfirm) isMessageBody_MessageType() {}
 
 var File_libatbus_protocol_proto protoreflect.FileDescriptor
 
@@ -1530,7 +1588,9 @@ const file_libatbus_protocol_proto_rawDesc = "" +
 	"access_key\x18\b \x01(\v2'.atframework.atbus.protocol.access_dataR\taccessKey\x12\x1b\n" +
 	"\thash_code\x18\n" +
 	" \x01(\tR\bhashCode\x12\\\n" +
-	"\x10crypto_handshake\x18\v \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\"\x8e\x01\n" +
+	"\x10crypto_handshake\x18\v \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\"4\n" +
+	"\x16handshake_confirm_data\x12\x1a\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\"\x8e\x01\n" +
 	"\x13message_head_crypto\x12U\n" +
 	"\talgorithm\x18\x01 \x01(\x0e27.atframework.atbus.protocol.ATBUS_CRYPTO_ALGORITHM_TYPER\talgorithm\x12\x0e\n" +
 	"\x02iv\x18\x02 \x01(\fR\x02iv\x12\x10\n" +
@@ -1547,16 +1607,17 @@ const file_libatbus_protocol_proto_rawDesc = "" +
 	"\rsource_bus_id\x18\x05 \x01(\x04R\vsourceBusId\x12G\n" +
 	"\x06crypto\x18\x06 \x01(\v2/.atframework.atbus.protocol.message_head_cryptoR\x06crypto\x12V\n" +
 	"\vcompression\x18\a \x01(\v24.atframework.atbus.protocol.message_head_compressionR\vcompression\x12\x1b\n" +
-	"\tbody_size\x18\t \x01(\x04R\bbodySize\"\xe0\x05\n" +
+	"\tbody_size\x18\t \x01(\x04R\bbodySize\"\xc3\x06\n" +
 	"\fmessage_body\x12_\n" +
-	"\x12custom_command_req\x18\v \x01(\v2/.atframework.atbus.protocol.custom_command_dataH\x00R\x10customCommandReq\x12_\n" +
-	"\x12custom_command_rsp\x18\f \x01(\v2/.atframework.atbus.protocol.custom_command_dataH\x00R\x10customCommandRsp\x12X\n" +
-	"\x12data_transform_req\x18\r \x01(\v2(.atframework.atbus.protocol.forward_dataH\x00R\x10dataTransformReq\x12X\n" +
-	"\x12data_transform_rsp\x18\x0e \x01(\v2(.atframework.atbus.protocol.forward_dataH\x00R\x10dataTransformRsp\x12W\n" +
-	"\x11node_register_req\x18\x11 \x01(\v2).atframework.atbus.protocol.register_dataH\x00R\x0fnodeRegisterReq\x12W\n" +
-	"\x11node_register_rsp\x18\x12 \x01(\v2).atframework.atbus.protocol.register_dataH\x00R\x0fnodeRegisterRsp\x12K\n" +
-	"\rnode_ping_req\x18\x15 \x01(\v2%.atframework.atbus.protocol.ping_dataH\x00R\vnodePingReq\x12K\n" +
-	"\rnode_pong_rsp\x18\x16 \x01(\v2%.atframework.atbus.protocol.ping_dataH\x00R\vnodePongRspB\x0e\n" +
+	"\x12custom_command_req\x18\x01 \x01(\v2/.atframework.atbus.protocol.custom_command_dataH\x00R\x10customCommandReq\x12_\n" +
+	"\x12custom_command_rsp\x18\x02 \x01(\v2/.atframework.atbus.protocol.custom_command_dataH\x00R\x10customCommandRsp\x12X\n" +
+	"\x12data_transform_req\x18\x03 \x01(\v2(.atframework.atbus.protocol.forward_dataH\x00R\x10dataTransformReq\x12X\n" +
+	"\x12data_transform_rsp\x18\x04 \x01(\v2(.atframework.atbus.protocol.forward_dataH\x00R\x10dataTransformRsp\x12W\n" +
+	"\x11node_register_req\x18\x05 \x01(\v2).atframework.atbus.protocol.register_dataH\x00R\x0fnodeRegisterReq\x12W\n" +
+	"\x11node_register_rsp\x18\x06 \x01(\v2).atframework.atbus.protocol.register_dataH\x00R\x0fnodeRegisterRsp\x12K\n" +
+	"\rnode_ping_req\x18\a \x01(\v2%.atframework.atbus.protocol.ping_dataH\x00R\vnodePingReq\x12K\n" +
+	"\rnode_pong_rsp\x18\b \x01(\v2%.atframework.atbus.protocol.ping_dataH\x00R\vnodePongRsp\x12a\n" +
+	"\x11handshake_confirm\x18\t \x01(\v22.atframework.atbus.protocol.handshake_confirm_dataH\x00R\x10handshakeConfirmB\x0e\n" +
 	"\fmessage_type*|\n" +
 	"\x14ATBUS_PROTOCOL_CONST\x12 \n" +
 	"\x1cATBUS_PROTOCOL_CONST_UNKNOWN\x10\x00\x12\x1a\n" +
@@ -1615,7 +1676,7 @@ func file_libatbus_protocol_proto_rawDescGZIP() []byte {
 }
 
 var file_libatbus_protocol_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_libatbus_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_libatbus_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_libatbus_protocol_proto_goTypes = []any{
 	(ATBUS_PROTOCOL_CONST)(0),             // 0: atframework.atbus.protocol.ATBUS_PROTOCOL_CONST
 	(ATBUS_FORWARD_DATA_FLAG_TYPE)(0),     // 1: atframework.atbus.protocol.ATBUS_FORWARD_DATA_FLAG_TYPE
@@ -1633,10 +1694,11 @@ var file_libatbus_protocol_proto_goTypes = []any{
 	(*ChannelData)(nil),                   // 13: atframework.atbus.protocol.channel_data
 	(*PingData)(nil),                      // 14: atframework.atbus.protocol.ping_data
 	(*RegisterData)(nil),                  // 15: atframework.atbus.protocol.register_data
-	(*MessageHeadCrypto)(nil),             // 16: atframework.atbus.protocol.message_head_crypto
-	(*MessageHeadCompression)(nil),        // 17: atframework.atbus.protocol.message_head_compression
-	(*MessageHead)(nil),                   // 18: atframework.atbus.protocol.message_head
-	(*MessageBody)(nil),                   // 19: atframework.atbus.protocol.message_body
+	(*HandshakeConfirmData)(nil),          // 16: atframework.atbus.protocol.handshake_confirm_data
+	(*MessageHeadCrypto)(nil),             // 17: atframework.atbus.protocol.message_head_crypto
+	(*MessageHeadCompression)(nil),        // 18: atframework.atbus.protocol.message_head_compression
+	(*MessageHead)(nil),                   // 19: atframework.atbus.protocol.message_head
+	(*MessageBody)(nil),                   // 20: atframework.atbus.protocol.message_body
 }
 var file_libatbus_protocol_proto_depIdxs = []int32{
 	5,  // 0: atframework.atbus.protocol.crypto_handshake_data.type:type_name -> atframework.atbus.protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
@@ -1652,8 +1714,8 @@ var file_libatbus_protocol_proto_depIdxs = []int32{
 	8,  // 10: atframework.atbus.protocol.register_data.crypto_handshake:type_name -> atframework.atbus.protocol.crypto_handshake_data
 	4,  // 11: atframework.atbus.protocol.message_head_crypto.algorithm:type_name -> atframework.atbus.protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
 	6,  // 12: atframework.atbus.protocol.message_head_compression.type:type_name -> atframework.atbus.protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
-	16, // 13: atframework.atbus.protocol.message_head.crypto:type_name -> atframework.atbus.protocol.message_head_crypto
-	17, // 14: atframework.atbus.protocol.message_head.compression:type_name -> atframework.atbus.protocol.message_head_compression
+	17, // 13: atframework.atbus.protocol.message_head.crypto:type_name -> atframework.atbus.protocol.message_head_crypto
+	18, // 14: atframework.atbus.protocol.message_head.compression:type_name -> atframework.atbus.protocol.message_head_compression
 	10, // 15: atframework.atbus.protocol.message_body.custom_command_req:type_name -> atframework.atbus.protocol.custom_command_data
 	10, // 16: atframework.atbus.protocol.message_body.custom_command_rsp:type_name -> atframework.atbus.protocol.custom_command_data
 	11, // 17: atframework.atbus.protocol.message_body.data_transform_req:type_name -> atframework.atbus.protocol.forward_data
@@ -1662,11 +1724,12 @@ var file_libatbus_protocol_proto_depIdxs = []int32{
 	15, // 20: atframework.atbus.protocol.message_body.node_register_rsp:type_name -> atframework.atbus.protocol.register_data
 	14, // 21: atframework.atbus.protocol.message_body.node_ping_req:type_name -> atframework.atbus.protocol.ping_data
 	14, // 22: atframework.atbus.protocol.message_body.node_pong_rsp:type_name -> atframework.atbus.protocol.ping_data
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	16, // 23: atframework.atbus.protocol.message_body.handshake_confirm:type_name -> atframework.atbus.protocol.handshake_confirm_data
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_libatbus_protocol_proto_init() }
@@ -1674,7 +1737,7 @@ func file_libatbus_protocol_proto_init() {
 	if File_libatbus_protocol_proto != nil {
 		return
 	}
-	file_libatbus_protocol_proto_msgTypes[11].OneofWrappers = []any{
+	file_libatbus_protocol_proto_msgTypes[12].OneofWrappers = []any{
 		(*MessageBody_CustomCommandReq)(nil),
 		(*MessageBody_CustomCommandRsp)(nil),
 		(*MessageBody_DataTransformReq)(nil),
@@ -1683,6 +1746,7 @@ func file_libatbus_protocol_proto_init() {
 		(*MessageBody_NodeRegisterRsp)(nil),
 		(*MessageBody_NodePingReq)(nil),
 		(*MessageBody_NodePongRsp)(nil),
+		(*MessageBody_HandshakeConfirm)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1690,7 +1754,7 @@ func file_libatbus_protocol_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_libatbus_protocol_proto_rawDesc), len(file_libatbus_protocol_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

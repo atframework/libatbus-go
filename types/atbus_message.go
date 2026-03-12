@@ -17,9 +17,10 @@ const (
 	MessageBodyTypeDataTransformRsp = protocol.MessageBody_EnMessageTypeID_DataTransformRsp
 	MessageBodyTypeNodeRegisterReq  = protocol.MessageBody_EnMessageTypeID_NodeRegisterReq
 	MessageBodyTypeNodeRegisterRsp  = protocol.MessageBody_EnMessageTypeID_NodeRegisterRsp
-	MessageBodyTypeNodePingReq      = protocol.MessageBody_EnMessageTypeID_NodePingReq
-	MessageBodyTypeNodePongRsp      = protocol.MessageBody_EnMessageTypeID_NodePongRsp
-	MessageBodyTypeNodeMax          = MessageBodyTypeNodePongRsp
+	MessageBodyTypeNodePingReq         = protocol.MessageBody_EnMessageTypeID_NodePingReq
+	MessageBodyTypeNodePongRsp         = protocol.MessageBody_EnMessageTypeID_NodePongRsp
+	MessageBodyTypeHandshakeConfirm    = protocol.MessageBody_EnMessageTypeID_HandshakeConfirm
+	MessageBodyTypeNodeMax             = MessageBodyTypeHandshakeConfirm
 )
 
 // Message is the Go equivalent of C++ atbus::message.
