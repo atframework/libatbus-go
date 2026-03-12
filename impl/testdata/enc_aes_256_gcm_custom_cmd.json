@@ -1,0 +1,21 @@
+{
+  "name": "enc_aes_256_gcm_custom_cmd",
+  "description": "Custom command request with aes_256_gcm encryption",
+  "protocol_version": 3,
+  "body_type": "custom_command_req",
+  "body_type_case": 11,
+  "crypto_algorithm": "aes_256_gcm",
+  "crypto_algorithm_type": 16,
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "key_size": 32,
+  "iv_hex": "b0b1b2b3b4b5b6b7b8b9babb",
+  "iv_size": 12,
+  "aad_hex": "307836393666303131642e307837376434622d307865313330343138366233316135356461",
+  "aad_size": 37,
+  "packed_size": 115,
+  "packed_hex": "3d080332370810120cb0b1b2b3b4b5b6b7b8b9babb5a25307836393666303131642e307837376434622d3078653133303431383662333161353564614825c3765222235821cda7037109cc4f8ec8805f24b6243c893f5aaff0966d90f41c012a515d51597d04603db128bed99faa4d64e425c1",
+  "expected": {
+    "from": 12379813738877118345,
+    "commands": ["cmd1", "arg1", "arg2"]
+  }
+}

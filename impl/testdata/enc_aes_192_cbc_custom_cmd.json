@@ -1,0 +1,19 @@
+{
+  "name": "enc_aes_192_cbc_custom_cmd",
+  "description": "Custom command request with aes_192_cbc encryption",
+  "protocol_version": 3,
+  "body_type": "custom_command_req",
+  "body_type_case": 11,
+  "crypto_algorithm": "aes_192_cbc",
+  "crypto_algorithm_type": 12,
+  "key_hex": "000102030405060708090a0b0c0d0e0f1011121314151617",
+  "key_size": 24,
+  "iv_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "iv_size": 16,
+  "packed_size": 75,
+  "packed_hex": "1a08033214080c1210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf482565a42bc7640b9ede6549eac8ec781993b0defd0734812196bb263cd81c930659a6ce405b312d799baad23f01c2bc9e64",
+  "expected": {
+    "from": 12379813738877118345,
+    "commands": ["cmd1", "arg1", "arg2"]
+  }
+}
