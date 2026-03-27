@@ -114,6 +114,11 @@ type IoStreamConnection struct {
 	// writeQueue is the channel for outgoing messages
 	writeQueue chan []byte
 
+	// disconnectCh is closed to signal writeLoop for graceful disconnect draining
+	disconnectCh chan struct{}
+	// disconnectOnce ensures disconnectCh is closed at most once
+	disconnectOnce sync.Once
+
 	// privateData holds user-defined data
 	privateData interface{}
 
@@ -254,7 +259,7 @@ func (c *IoStreamChannel) GetContext() context.Context {
 }
 
 // SetFlag sets or clears a channel flag.
-func (c *IoStreamChannel) SetFlag(f IoStreamConnectionFlag, v bool) {
+func (c *IoStreamChannel) SetFlag(f IoStreamChannelFlag, v bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if v {
@@ -265,7 +270,7 @@ func (c *IoStreamChannel) SetFlag(f IoStreamConnectionFlag, v bool) {
 }
 
 // GetFlag returns whether a flag is set.
-func (c *IoStreamChannel) GetFlag(f IoStreamConnectionFlag) bool {
+func (c *IoStreamChannel) GetFlag(f IoStreamChannelFlag) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return (c.flags & uint32(f)) != 0

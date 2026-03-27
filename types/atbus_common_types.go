@@ -278,9 +278,9 @@ func SetDefaultIoStreamConfigure(conf *IoStreamConfigure) {
 type IoStreamChannel interface {
 	GetContext() context.Context
 
-	SetFlag(f IoStreamConnectionFlag, v bool)
+	SetFlag(f IoStreamChannelFlag, v bool)
 
-	GetFlag(f IoStreamConnectionFlag) bool
+	GetFlag(f IoStreamChannelFlag) bool
 
 	// 事件响应函数集合
 	GetEventHandleSet() *IoStreamCallbackEventHandleSet

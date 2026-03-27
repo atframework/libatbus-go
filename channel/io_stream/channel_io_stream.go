@@ -198,9 +198,7 @@ func (c *IoStreamChannel) Close() error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	c.mu.Lock()
-	c.flags |= uint32(IoStreamChannelFlagClosing)
-	c.mu.Unlock()
+	c.SetFlag(IoStreamChannelFlagClosing, true)
 
 	// Cancel the context to stop all goroutines
 	c.cancel()
@@ -293,17 +291,8 @@ func (c *IoStreamChannel) acceptLoop(listener net.Listener, listenAddr *channel_
 // readLoop handles reading data from a connection.
 func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 	defer func() {
-		// Mark connection as disconnected
-		conn.SetStatus(IoStreamConnectionStatusDisconnected)
-		conn.closed.Store(true)
-
-		// Remove from connections map
-		c.mu.Lock()
-		delete(c.connections, conn.conn)
-		c.mu.Unlock()
-
-		// Fire disconnected callback
-		c.fireCallback(IoStreamCallbackEventTypeDisconnected, conn, 0)
+		// Ensure the connection is fully torn down so writeLoop also exits
+		c.disconnectInternal(conn, false)
 	}()
 
 	readBuf := make([]byte, DefaultReadBufferSize)
@@ -396,6 +385,10 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 
 // writeLoop handles writing data to a connection.
 func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
+	defer func() {
+		c.disconnectRun(conn)
+	}()
+
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -405,36 +398,76 @@ func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
 				return
 			}
 
-			if conn.closed.Load() || conn.GetStatus() != IoStreamConnectionStatusConnected {
+			if conn.closed.Load() {
 				return
 			}
 
-			conn.SetFlag(IoStreamConnectionFlagWriting, true)
-
-			// Write the frame
-			written := 0
-			for written < len(data) {
-				n, err := conn.conn.Write(data[written:])
-				if err != nil {
-					conn.SetFlag(IoStreamConnectionFlagWriting, false)
-					// Write error, disconnect
-					c.disconnectInternal(conn, false)
-					return
-				}
-				written += n
+			if !c.writeFrameAndNotify(conn, data) {
+				return
 			}
 
+			// if in disconnecting status and there is no more data to write, close it
+			// (matches C++ io_stream_on_written_fn behavior)
+			if conn.GetStatus() == IoStreamConnectionStatusDisconnecting {
+				c.drainRemainingWrites(conn)
+				return
+			}
+		case <-conn.disconnectCh:
+			// Graceful disconnect signal: drain remaining writes then close
+			c.drainRemainingWrites(conn)
+			return
+		}
+	}
+}
+
+// writeFrameAndNotify writes a single frame to the connection and fires the written callback.
+// Returns false on write error.
+func (c *IoStreamChannel) writeFrameAndNotify(conn *IoStreamConnection, data []byte) bool {
+	conn.SetFlag(IoStreamConnectionFlagWriting, true)
+
+	// Write the frame
+	written := 0
+	for written < len(data) {
+		n, err := conn.conn.Write(data[written:])
+		if err != nil {
 			conn.SetFlag(IoStreamConnectionFlagWriting, false)
+			return false
+		}
+		written += n
+	}
 
-			// Fire written callback - extract payload from frame for callback
-			// Frame format: [hash:4][varint:N][payload]
-			if len(data) > HashSize {
-				payloadLen, headerSize, _ := TryUnpackFrameHeader(data)
-				if headerSize > 0 && len(data) >= headerSize+int(payloadLen) {
-					payload := data[headerSize : headerSize+int(payloadLen)]
-					c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
-				}
+	conn.SetFlag(IoStreamConnectionFlagWriting, false)
+
+	// Fire written callback - extract payload from frame for callback
+	// Frame format: [hash:4][varint:N][payload]
+	if len(data) > HashSize {
+		payloadLen, headerSize, _ := TryUnpackFrameHeader(data)
+		if headerSize > 0 && len(data) >= headerSize+int(payloadLen) {
+			payload := data[headerSize : headerSize+int(payloadLen)]
+			c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
+		}
+	}
+
+	return true
+}
+
+// drainRemainingWrites drains all pending write data from the queue, writing each frame.
+// This is called during graceful disconnect to flush buffered data before closing.
+func (c *IoStreamChannel) drainRemainingWrites(conn *IoStreamConnection) {
+	for {
+		select {
+		case data, ok := <-conn.writeQueue:
+			if !ok {
+				return
 			}
+			if conn.closed.Load() {
+				return
+			}
+			if !c.writeFrameAndNotify(conn, data) {
+				return
+			}
+		default:
+			return
 		}
 	}
 }
@@ -450,6 +483,7 @@ func (c *IoStreamChannel) createConnection(conn net.Conn, addr *channel_utility.
 		readBufferManager: buffer.NewBufferManager(),
 		frameReader:       NewFrameReader(DefaultReadBufferSize),
 		writeQueue:        make(chan []byte, DefaultWriteQueueSize),
+		disconnectCh:      make(chan struct{}),
 	}
 
 	// Configure buffer manager
@@ -464,14 +498,57 @@ func (c *IoStreamChannel) createConnection(conn net.Conn, addr *channel_utility.
 	return ioConn
 }
 
-// disconnectInternal handles disconnecting a connection.
-func (c *IoStreamChannel) disconnectInternal(conn *IoStreamConnection, isClosing bool) error_code.ErrorType {
+// disconnectInternal initiates disconnection of a connection.
+//
+// When force=false (user's Disconnect(), readLoop exit), if a write is in progress
+// (kWriting flag set), the actual shutdown is deferred — writeLoop will complete pending
+// writes and then call disconnectRun. This matches C++ io_stream_disconnect_internal behavior.
+//
+// When force=true (channel Close()), shutdown proceeds immediately regardless of
+// pending writes.
+func (c *IoStreamChannel) disconnectInternal(conn *IoStreamConnection, force bool) error_code.ErrorType {
+	if conn == nil {
+		return error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	conn.mu.Lock()
+	if conn.status != IoStreamConnectionStatusConnected {
+		conn.mu.Unlock()
+		if force {
+			// Force close even if already disconnecting
+			return c.disconnectRun(conn)
+		}
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+	conn.status = IoStreamConnectionStatusDisconnecting
+	conn.mu.Unlock()
+
+	// if there is any writing data, closing this connection later
+	// (matches C++ io_stream_disconnect_internal: defer if kWriting && !force)
+	if !force && conn.GetFlag(IoStreamConnectionFlagWriting) {
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	if !force {
+		// Signal writeLoop to drain remaining writes and close gracefully
+		conn.disconnectOnce.Do(func() {
+			close(conn.disconnectCh)
+		})
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	return c.disconnectRun(conn)
+}
+
+// disconnectRun performs the actual connection teardown.
+// It is idempotent — protected by conn.closed atomic swap.
+// This matches C++ io_stream_disconnect_run + io_stream_shutdown_connection + on_close callback.
+func (c *IoStreamChannel) disconnectRun(conn *IoStreamConnection) error_code.ErrorType {
 	if conn.closed.Swap(true) {
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
 	conn.mu.Lock()
-	conn.status = IoStreamConnectionStatusDisconnecting
 	conn.flags |= uint32(IoStreamConnectionFlagClosing)
 	conn.mu.Unlock()
 
@@ -483,10 +560,15 @@ func (c *IoStreamChannel) disconnectInternal(conn *IoStreamConnection, isClosing
 		conn.conn.Close()
 	}
 
-	// Remove from connections map (if not already done by readLoop)
+	// Remove from connections map
 	c.mu.Lock()
 	delete(c.connections, conn.conn)
 	c.mu.Unlock()
+
+	conn.SetStatus(IoStreamConnectionStatusDisconnected)
+
+	// Fire disconnected callback
+	c.fireCallback(IoStreamCallbackEventTypeDisconnected, conn, 0)
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -541,14 +623,10 @@ func (c *IoStreamChannel) fireCallbackWithData(eventType IoStreamCallbackEventTy
 	}
 
 	// Set in-callback flag
-	c.mu.Lock()
-	c.flags |= uint32(IoStreamChannelFlagInCallback)
-	c.mu.Unlock()
+	c.SetFlag(IoStreamChannelFlagInCallback, true)
 
 	defer func() {
-		c.mu.Lock()
-		c.flags &^= uint32(IoStreamChannelFlagInCallback)
-		c.mu.Unlock()
+		c.SetFlag(IoStreamChannelFlagInCallback, false)
 	}()
 
 	// Channel-level callback
