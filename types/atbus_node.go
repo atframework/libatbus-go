@@ -239,9 +239,9 @@ type Node interface {
 
 	Reset() ErrorType
 
-	Proc(now time.Time) ErrorType
+	Proc(now time.Time) (int32, ErrorType)
 
-	Poll() ErrorType
+	Poll() (int32, ErrorType)
 
 	Listen(address string) ErrorType
 

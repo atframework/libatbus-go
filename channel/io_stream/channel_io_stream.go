@@ -2,6 +2,7 @@ package libatbus_channel_iostream
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,15 @@ const (
 	DefaultWriteQueueSize = 1024
 	// DefaultReadBufferSize is the default read buffer size
 	DefaultReadBufferSize = 64 * 1024
+	// DataSmallSize matches C++ ATBUS_MACRO_DATA_SMALL_SIZE.
+	// Small frames that fit within this size are parsed from a per-connection
+	// static buffer without dynamic allocation.
+	DataSmallSize = 7168
+	// MessageMaxMergeSize, just like C++ ATBUS_MACRO_MESSAGE_MAX_MERGE_SIZE, is the maximum size of a single message that can be merged in the small-write merging logic.
+	MessageMaxMergeSize = 64 * 1024
+	// MergeBufferMaxSize is the maximum total size for small-write merging.
+	// Matches C++ ATBUS_MACRO_TLS_MERGE_BUFFER_LEN.
+	MergeBufferMaxSize = MessageMaxMergeSize - 256
 )
 
 // NewIoStreamChannel creates a new IO stream channel.
@@ -289,6 +299,9 @@ func (c *IoStreamChannel) acceptLoop(listener net.Listener, listenAddr *channel_
 }
 
 // readLoop handles reading data from a connection.
+// Uses a two-phase approach matching C++ io_stream_on_recv_read_fn:
+//   - Phase 1 (head): Small packets are parsed from a per-connection static buffer (readHead).
+//   - Phase 2 (body): Large packets use a dynamically allocated buffer (readLargeFrame).
 func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 	defer func() {
 		// Ensure the connection is fully torn down so writeLoop also exits
@@ -341,49 +354,203 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 			continue
 		}
 
-		// Write to frame reader
-		conn.frameReader.Write(readBuf[:n])
+		isFree := false
+		incoming := readBuf[:n]
 
-		// Try to read complete frames
-		for {
-			result := conn.frameReader.ReadFrame()
-			if result.Error != nil {
-				if errors.Is(result.Error, ErrIncompleteFrame) {
-					// Need more data
+		// Feed incoming data to either the large frame buffer (body phase)
+		// or the static head buffer (head phase).
+		for len(incoming) > 0 {
+			if conn.readLargeFrame != nil {
+				// Phase 2 (body): feed data to the large frame buffer
+				remaining := HashSize + conn.readLargeFrame.msgLen - conn.readLargeFrame.writePos
+				copyLen := len(incoming)
+				if copyLen > remaining {
+					copyLen = remaining
+				}
+				copy(conn.readLargeFrame.buffer[conn.readLargeFrame.writePos:], incoming[:copyLen])
+				conn.readLargeFrame.writePos += copyLen
+				incoming = incoming[copyLen:]
+
+				// Check if the large frame is complete
+				if conn.readLargeFrame.writePos >= HashSize+conn.readLargeFrame.msgLen {
+					if c.processCompleteLargeFrame(conn) {
+						isFree = true
+						break
+					}
+					conn.readLargeFrame = nil
+				}
+			} else {
+				// Phase 1 (head): feed data to the static head buffer
+				space := DataSmallSize - conn.readHead.len
+				if space <= 0 {
+					// Head buffer full but no frames could be parsed - data error
+					isFree = true
 					break
 				}
-
-				if errors.Is(result.Error, ErrInvalidFrameHash) {
-					atomic.AddUint64(&conn.checkHashFailedCount, 1)
-					atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
-					if conn.checkHashFailedCount > c.conf.MaxReadCheckHashFailedCount {
-						return
-					}
-					// Skip this frame and continue
-					continue
+				copyLen := len(incoming)
+				if copyLen > space {
+					copyLen = space
 				}
+				copy(conn.readHead.buffer[conn.readHead.len:], incoming[:copyLen])
+				conn.readHead.len += copyLen
+				incoming = incoming[copyLen:]
 
-				// Other error
-				return
-			}
-
-			// Check payload size
-			if c.conf.ReceiveBufferLimitSize > 0 && uint64(len(result.Payload)) > c.conf.ReceiveBufferLimitSize {
-				atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
-				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-				if conn.checkBlockSizeFailedCount > c.conf.MaxReadCheckBlockSizeFailedCount {
-					return
+				// Parse complete frames from the head buffer
+				if c.processReadHeadFrames(conn) {
+					isFree = true
+					break
 				}
-				continue
+				// processReadHeadFrames may have set conn.readLargeFrame,
+				// so loop back to feed remaining incoming data to the correct target.
 			}
+		}
 
-			// Fire received callback
-			c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, 0, result.Payload)
+		if isFree {
+			return
 		}
 	}
 }
 
+// processReadHeadFrames parses complete frames from the per-connection static head buffer.
+// Small frames (total framed size <= DataSmallSize) are dispatched directly from the head
+// buffer. When a large frame header is detected (payload won't fit in the head buffer),
+// a dynamic buffer is allocated and the transition to body phase is initiated.
+// Returns true if the connection should be forcibly closed.
+func (c *IoStreamChannel) processReadHeadFrames(conn *IoStreamConnection) bool {
+	isFree := false
+	buffStart := 0
+	buffLeftLen := conn.readHead.len
+
+	for buffLeftLen > HashSize {
+		// Try to read varint payload length
+		msgLen, vintSize := buffer.ReadVint(conn.readHead.buffer[buffStart+HashSize : buffStart+buffLeftLen])
+		if vintSize == 0 {
+			// Incomplete varint, need more data
+			break
+		}
+
+		totalFrameSize := HashSize + vintSize + int(msgLen)
+
+		if buffLeftLen >= totalFrameSize {
+			// Complete frame in head buffer - process it directly
+			payloadStart := buffStart + HashSize + vintSize
+			payload := conn.readHead.buffer[payloadStart : payloadStart+int(msgLen)]
+
+			// Verify hash
+			expectedHash := binary.LittleEndian.Uint32(
+				conn.readHead.buffer[buffStart : buffStart+HashSize])
+			actualHash := CalculateHash(payload)
+
+			if actualHash != expectedHash {
+				atomic.AddUint64(&conn.checkHashFailedCount, 1)
+				atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
+				if conn.checkHashFailedCount > c.conf.MaxReadCheckHashFailedCount {
+					isFree = true
+				}
+			} else if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
+				atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
+				if conn.checkBlockSizeFailedCount > c.conf.MaxReadCheckBlockSizeFailedCount {
+					isFree = true
+				}
+			} else {
+				// Fire received callback.
+				// The payload is a slice into the static head buffer and is valid
+				// only for the duration of this synchronous callback.
+				c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, 0, payload)
+			}
+
+			buffStart += totalFrameSize
+			buffLeftLen -= totalFrameSize
+		} else if totalFrameSize <= DataSmallSize {
+			break
+		} else {
+			// Frame exceeds static head buffer capacity - use large frame path.
+			// Check message size limit before allocating.
+			if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
+				atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
+				isFree = true
+				break
+			}
+
+			// Allocate dynamic buffer: [hash:4][payload:msgLen]
+			largeBufSize := HashSize + int(msgLen)
+			largeBuf := make([]byte, largeBufSize)
+
+			// Copy hash from head buffer
+			copy(largeBuf[0:HashSize],
+				conn.readHead.buffer[buffStart:buffStart+HashSize])
+
+			// Copy remaining payload data from head buffer (data after the varint)
+			remainingPayloadBytes := buffLeftLen - HashSize - vintSize
+			if remainingPayloadBytes > 0 {
+				copy(largeBuf[HashSize:],
+					conn.readHead.buffer[buffStart+HashSize+vintSize:buffStart+buffLeftLen])
+			}
+
+			conn.readLargeFrame = &readLargeFrameState{
+				buffer:   largeBuf,
+				writePos: HashSize + remainingPayloadBytes,
+				msgLen:   int(msgLen),
+			}
+
+			buffStart += buffLeftLen
+			buffLeftLen = 0
+			break
+		}
+	}
+
+	// Compact: move leftover data to the front of the head buffer
+	if buffStart > 0 && buffLeftLen > 0 {
+		copy(conn.readHead.buffer[:], conn.readHead.buffer[buffStart:buffStart+buffLeftLen])
+	}
+	conn.readHead.len = buffLeftLen
+
+	return isFree
+}
+
+// processCompleteLargeFrame processes a fully assembled large frame from the dynamic buffer.
+// Returns true if the connection should be forcibly closed.
+func (c *IoStreamChannel) processCompleteLargeFrame(conn *IoStreamConnection) bool {
+	lf := conn.readLargeFrame
+	if lf == nil {
+		return false
+	}
+
+	payload := lf.buffer[HashSize : HashSize+lf.msgLen]
+
+	// Verify hash
+	expectedHash := binary.LittleEndian.Uint32(lf.buffer[0:HashSize])
+	actualHash := CalculateHash(payload)
+
+	if actualHash != expectedHash {
+		atomic.AddUint64(&conn.checkHashFailedCount, 1)
+		atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
+		if conn.checkHashFailedCount > c.conf.MaxReadCheckHashFailedCount {
+			return true
+		}
+		return false
+	}
+
+	if c.conf.ReceiveBufferLimitSize > 0 && uint64(lf.msgLen) > c.conf.ReceiveBufferLimitSize {
+		atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+		atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
+		if conn.checkBlockSizeFailedCount > c.conf.MaxReadCheckBlockSizeFailedCount {
+			return true
+		}
+		return false
+	}
+
+	// Fire received callback
+	c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, 0, payload)
+	return false
+}
+
 // writeLoop handles writing data to a connection.
+// Implements small-write merging matching C++ io_stream_try_write:
+// when multiple small frames are queued, they are merged into a single
+// write syscall to reduce overhead.
 func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
 	defer func() {
 		c.disconnectRun(conn)
@@ -402,8 +569,23 @@ func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
 				return
 			}
 
-			if !c.writeFrameAndNotify(conn, data) {
-				return
+			// Try small-write merging: if the first frame is small and more are queued,
+			// merge them into a single write (matches C++ io_stream_try_write merge logic)
+			if len(data) <= DataSmallSize && len(conn.writeQueue) > 0 {
+				frames := c.collectSmallWrites(conn, data)
+				if len(frames) > 1 {
+					if !c.writeMergedFramesAndNotify(conn, frames) {
+						return
+					}
+				} else {
+					if !c.writeFrameAndNotify(conn, data) {
+						return
+					}
+				}
+			} else {
+				if !c.writeFrameAndNotify(conn, data) {
+					return
+				}
 			}
 
 			// if in disconnecting status and there is no more data to write, close it
@@ -451,6 +633,78 @@ func (c *IoStreamChannel) writeFrameAndNotify(conn *IoStreamConnection, data []b
 	return true
 }
 
+// collectSmallWrites non-blocking drains additional frames from the write queue
+// for merging into a single write. Returns at least the initial frame.
+// Stops when the total size reaches MergeBufferMaxSize or the queue is empty.
+func (c *IoStreamChannel) collectSmallWrites(conn *IoStreamConnection, first []byte) [][]byte {
+	frames := [][]byte{first}
+	totalSize := len(first)
+
+	for totalSize < MergeBufferMaxSize {
+		select {
+		case data, ok := <-conn.writeQueue:
+			if !ok {
+				return frames
+			}
+			frames = append(frames, data)
+			totalSize += len(data)
+			if totalSize >= MergeBufferMaxSize {
+				return frames
+			}
+		default:
+			// No more data available
+			return frames
+		}
+	}
+	return frames
+}
+
+// writeMergedFramesAndNotify merges multiple frames into a single write syscall
+// and fires written callbacks for each original frame afterward.
+// This matches the C++ io_stream_try_write small-buffer merge optimization.
+func (c *IoStreamChannel) writeMergedFramesAndNotify(conn *IoStreamConnection, frames [][]byte) bool {
+	conn.SetFlag(IoStreamConnectionFlagWriting, true)
+
+	// Calculate total size and merge into one buffer
+	totalSize := 0
+	for _, f := range frames {
+		totalSize += len(f)
+	}
+
+	merged := make([]byte, totalSize)
+	pos := 0
+	for _, f := range frames {
+		copy(merged[pos:], f)
+		pos += len(f)
+	}
+
+	// Write merged buffer in one syscall
+	written := 0
+	for written < len(merged) {
+		n, err := conn.conn.Write(merged[written:])
+		if err != nil {
+			conn.SetFlag(IoStreamConnectionFlagWriting, false)
+			return false
+		}
+		written += n
+	}
+
+	conn.SetFlag(IoStreamConnectionFlagWriting, false)
+
+	// Fire written callbacks for each original frame
+	for _, frame := range frames {
+		if len(frame) > HashSize {
+			payloadLen, headerSize, _ := TryUnpackFrameHeader(frame)
+			if headerSize > 0 && len(frame) >= headerSize+int(payloadLen) {
+				payload := frame[headerSize : headerSize+int(payloadLen)]
+				c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
+			}
+		}
+	}
+
+	return true
+}
+
 // drainRemainingWrites drains all pending write data from the queue, writing each frame.
 // This is called during graceful disconnect to flush buffered data before closing.
 func (c *IoStreamChannel) drainRemainingWrites(conn *IoStreamConnection) {
@@ -481,7 +735,6 @@ func (c *IoStreamChannel) createConnection(conn net.Conn, addr *channel_utility.
 		status:            IoStreamConnectionStatusConnected,
 		flags:             uint32(flag),
 		readBufferManager: buffer.NewBufferManager(),
-		frameReader:       NewFrameReader(DefaultReadBufferSize),
 		writeQueue:        make(chan []byte, DefaultWriteQueueSize),
 		disconnectCh:      make(chan struct{}),
 	}

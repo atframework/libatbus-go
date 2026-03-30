@@ -369,15 +369,15 @@ func (n *Node) Reset() error_code.ErrorType {
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
-func (n *Node) Proc(now time.Time) error_code.ErrorType {
+func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 	if n == nil {
-		return error_code.EN_ATBUS_ERR_PARAMS
+		return 0, error_code.EN_ATBUS_ERR_PARAMS
 	}
 
 	// Use flag guard to prevent reentrance
 	fgd := &nodeFlagGuard{}
 	if fgd.openFlag(n, types.NodeFlag_InProc) {
-		return error_code.EN_ATBUS_ERR_SUCCESS
+		return 0, error_code.EN_ATBUS_ERR_SUCCESS
 	}
 	defer fgd.closeFlag()
 
@@ -387,16 +387,16 @@ func (n *Node) Proc(now time.Time) error_code.ErrorType {
 	}
 
 	if n.state == types.NodeState_Created {
-		return error_code.EN_ATBUS_ERR_NOT_INITED
+		return 0, error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
-	ret := 0
+	ret := int32(0)
 
 	// Check shutdown flag
 	if n.CheckFlag(types.NodeFlag_Shutdown) {
 		ret = 1 + n.dispatchAllSelfMessages()
 		n.Reset()
-		return error_code.ErrorType(ret)
+		return ret, error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
 	// Process connection timeouts
@@ -411,7 +411,7 @@ func (n *Node) Proc(now time.Time) error_code.ErrorType {
 	// Execute GC
 	n.executeGC()
 
-	return error_code.ErrorType(ret)
+	return ret, error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 // processConnectingTimeout handles timeout for connections that are still connecting
@@ -525,26 +525,38 @@ func (n *Node) processPingTimers(now time.Time) {
 // executeGC executes garbage collection for pending endpoints and connections
 func (n *Node) executeGC() {
 	// GC endpoints
-	for n.eventTimer.pendingEndpointGcList.Len() > 0 {
-		front := n.eventTimer.pendingEndpointGcList.Front()
-		if front == nil {
-			break
+	if !n.CheckFlag(types.NodeFlag_InGcEndpoints) {
+		var fgGc nodeFlagGuard
+		fgGc.openFlag(n, types.NodeFlag_InGcEndpoints)
+
+		for n.eventTimer.pendingEndpointGcList.Len() > 0 {
+			front := n.eventTimer.pendingEndpointGcList.Front()
+			if front == nil {
+				break
+			}
+			n.eventTimer.pendingEndpointGcList.Remove(front)
 		}
-		n.eventTimer.pendingEndpointGcList.Remove(front)
+
+		fgGc.closeFlag()
 	}
 
 	// GC connections
-	for n.eventTimer.pendingConnectionGcList.Len() > 0 {
-		front := n.eventTimer.pendingConnectionGcList.Front()
-		if front == nil {
-			break
+	if !n.CheckFlag(types.NodeFlag_InGcConnections) {
+		var fgGc nodeFlagGuard
+		fgGc.openFlag(n, types.NodeFlag_InGcConnections)
+
+		for n.eventTimer.pendingConnectionGcList.Len() > 0 {
+			front := n.eventTimer.pendingConnectionGcList.Front()
+			if front == nil {
+				break
+			}
+			n.eventTimer.pendingConnectionGcList.Remove(front)
 		}
-		n.eventTimer.pendingConnectionGcList.Remove(front)
 	}
 }
 
 // dispatchAllSelfMessages dispatches all pending self messages
-func (n *Node) dispatchAllSelfMessages() int {
+func (n *Node) dispatchAllSelfMessages() int32 {
 	// TODO: implement message dispatch for self-addressed messages
 	return 0
 }
@@ -586,9 +598,42 @@ func (n *Node) pingEndpoint(ep *Endpoint) error_code.ErrorType {
 	return ret
 }
 
-func (n *Node) Poll() error_code.ErrorType {
-	// TODO: implement me
-	return 0
+func (n *Node) Poll() (int32, error_code.ErrorType) {
+	if n == nil {
+		return 0, error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	if n.CheckFlag(types.NodeFlag_InCallback) {
+		return 0, error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	eventCount := int32(0)
+
+	var fg nodeFlagGuard
+	fg.openFlag(n, types.NodeFlag_InCallback)
+	defer fg.closeFlag()
+
+	if n.CheckFlag(types.NodeFlag_Shutdown) {
+		eventCount += 1 + n.dispatchAllSelfMessages()
+		n.Reset()
+		return eventCount, error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	// golang版本无法在主协程里收束 ioStreamChannel 的事件循环，所以忽略这部分控制
+
+	// dispatcher all self messages
+	eventCount += n.dispatchAllSelfMessages()
+
+	// GC - endpoint/connections
+	n.executeGC()
+
+	// stop action happened in any callback
+	if n.CheckFlag(types.NodeFlag_Shutdown) {
+		n.Reset()
+		eventCount += 1
+	}
+
+	return eventCount, error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func (n *Node) Listen(address string) error_code.ErrorType {
@@ -1674,8 +1719,7 @@ func (n *Node) OnPong(ep types.Endpoint, message *types.Message, body *protocol.
 }
 
 func (n *Node) DispatchAllSelfMessages() int32 {
-	// TODO: implement me
-	return 0
+	return n.DispatchAllSelfMessages()
 }
 
 func (n *Node) GetContext() context.Context {
@@ -2468,11 +2512,35 @@ func (n *Node) getHashCode() string {
 }
 
 func (n *Node) removeConnectionTimer(conn *Connection) {
-	if n == nil {
+	if n == nil || conn == nil {
 		return
 	}
 
-	// TODO: implement me
+	findConn, exists := n.eventTimer.connectingList.Get(conn.GetAddress().GetAddress(), false)
+	if !exists {
+		return
+	}
+
+	if findConn.Value == nil {
+		n.eventTimer.connectingList.Delete(conn.GetAddress().GetAddress())
+		return
+	}
+
+	if findConn.Value != conn {
+		return
+	}
+
+	if n.eventHandleset.OnInvalidConnection != nil && !findConn.Value.IsConnected() {
+		// 确认的临时连接断开不属于无效连接
+		if !findConn.Value.CheckFlag(types.ConnectionFlag_Temporary) || !findConn.Value.CheckFlag(types.ConnectionFlag_PeerClosed) {
+			var fg nodeFlagGuard
+			fg.openFlag(n, types.NodeFlag_InCallback)
+			n.eventHandleset.OnInvalidConnection(n, findConn.Value, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
+			fg.closeFlag()
+		}
+	}
+
+	n.eventTimer.connectingList.Delete(conn.GetAddress().GetAddress())
 }
 
 func (n *Node) LogDebug(ep types.Endpoint, conn types.Connection, m *types.Message, msg string, args ...any) {

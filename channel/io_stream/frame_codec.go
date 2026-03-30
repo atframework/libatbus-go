@@ -222,6 +222,13 @@ func (r *FrameReader) ReadFrame() UnpackFrameResult {
 		// Compact buffer if too much space is wasted
 		if r.readPos > len(r.buf)/2 {
 			remaining := r.writePos - r.readPos
+			// Defensive copy: compaction may overwrite result.Payload which
+			// is a sub-slice of r.buf before the new readPos.
+			if len(result.Payload) > 0 {
+				payload := make([]byte, len(result.Payload))
+				copy(payload, result.Payload)
+				result.Payload = payload
+			}
 			copy(r.buf, r.buf[r.readPos:r.writePos])
 			r.readPos = 0
 			r.writePos = remaining

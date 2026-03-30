@@ -342,7 +342,15 @@ func (c *Connection) GetConnectionContext() types.ConnectionContext {
 }
 
 func (c *Connection) RemoveOwnerChecker() {
-	// TODO: implement owner checker removal
+	if c == nil {
+		return
+	}
+
+	if c.owner == nil {
+		return
+	}
+
+	c.owner.removeConnectionTimer(c)
 }
 
 func (c *Connection) setBinding(ep types.Endpoint) {

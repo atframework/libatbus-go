@@ -82,6 +82,21 @@ const (
 	IoStreamChannelFlagInCallback = types.IoStreamChannelFlag_InCallback
 )
 
+// readHeadBuffer is the per-connection static buffer for small frame parsing.
+// Matches C++ read_head in io_stream_connection.
+type readHeadBuffer struct {
+	buffer [DataSmallSize]byte
+	len    int
+}
+
+// readLargeFrameState tracks an in-progress large frame being assembled.
+// Allocated when a large frame header is detected, freed after processing.
+type readLargeFrameState struct {
+	buffer   []byte // layout: [hash:4][payload:msgLen]
+	writePos int    // how many bytes written so far
+	msgLen   int    // expected payload length (excludes hash prefix)
+}
+
 // IoStreamConnection represents a single IO stream connection.
 type IoStreamConnection struct {
 	// channel is the parent channel
@@ -108,8 +123,14 @@ type IoStreamConnection struct {
 	// readBufferManager manages the receive buffer
 	readBufferManager *buffer.BufferManager
 
-	// frameReader handles frame parsing
-	frameReader *FrameReader
+	// readHead is the per-connection static buffer for small frame parsing.
+	// Small frames (total framed size <= DataSmallSize) are parsed directly from
+	// this buffer without dynamic allocation. Matches C++ read_head.
+	readHead readHeadBuffer
+
+	// readLargeFrame tracks an in-progress large frame being assembled.
+	// nil when no large frame is being read. Matches C++ read_buffer_manager body phase.
+	readLargeFrame *readLargeFrameState
 
 	// writeQueue is the channel for outgoing messages
 	writeQueue chan []byte
