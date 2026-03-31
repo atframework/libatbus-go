@@ -1402,7 +1402,7 @@ func (n *Node) CheckAccessHash(accessKey *protocol.AccessData, plainText string,
 	return false
 }
 
-func (n *Node) GetAccessCode() string {
+func (n *Node) GetHashCode() string {
 	if n == nil {
 		return ""
 	}

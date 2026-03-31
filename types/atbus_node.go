@@ -347,8 +347,8 @@ type Node interface {
 	// Return: 没有检查通过的 access token 则返回 false。
 	CheckAccessHash(accessKey *protocol.AccessData, plainText string, conn Connection) bool
 
-	// GetAccessCode 获取节点的 hash code。
-	GetAccessCode() string
+	// GetHashCode 获取节点的 hash code。
+	GetHashCode() string
 
 	GetIoStreamChannel() IoStreamChannel
 

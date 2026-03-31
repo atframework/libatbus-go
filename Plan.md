@@ -1,895 +1,851 @@
-# libatbus-go 实现计划
+# libatbus-go 功能补全计划
 
-> 目标：参照 C++ 版本 libatbus，使用 Go 原生网络库和 goroutine 完成同等功能实现，并确保单元测试覆盖所有 C++ 测试用例。
-
-## 一、项目概述
-
-### 1.1 C++ 仓库位置
-`D:\workspace\git\github\atframework\atsf4g-co\atframework\libatbus`
-
-### 1.2 Go 仓库位置
-`D:\workspace\git\github\atsf4g-go\atframework\libatbus-go`
-
-### 1.3 核心设计差异
-| 特性 | C++ 版本 | Go 版本 |
-|------|----------|---------|
-| IO 模型 | libuv (回调模式) | Go net 库 + goroutine |
-| 事件循环 | uv_run / uv_loop | context + goroutine 协作 |
-| 内存通道 | 支持 (mem/shm) | 不支持 (仅 iostream) |
-| 连接管理 | 单线程+回调 | 可并发 (需同步保护) |
-
-### 1.4 ⚠️ 跨语言互通要求 (关键约束)
-
-> **本项目的首要目标是确保 Go 版本能够与 C++ 版本完全互通。**
-
-这意味着：
-1. **协议格式必须完全一致** - 消息帧、Protobuf 序列化、字段顺序都必须与 C++ 版本保持二进制兼容
-2. **握手流程必须兼容** - 注册、认证、加密协商流程必须与 C++ 版本完全一致
-3. **拓扑关系必须互认** - Go 节点和 C++ 节点可以在同一集群中混合部署
-4. **错误码必须统一** - 使用相同的错误码定义
-
-#### 互通场景示例
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   C++ atproxy   │◄───►│   Go lobbysvr   │◄───►│   C++ gamesvr   │
-│   (上游节点)     │     │   (本项目实现)   │     │   (兄弟节点)     │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-```
-
-#### 必须验证的互通测试
-- [ ] Go 节点注册到 C++ 上游节点
-- [ ] C++ 节点注册到 Go 上游节点
-- [ ] Go 与 C++ 节点之间的消息收发
-- [ ] 混合部署下的路由转发
-- [ ] 加密通道的跨语言握手
-- [ ] 自定义命令的跨语言调用
+> 基于 C++ libatbus 仓库 (`atsf4g-co/atframework/libatbus`) 与 Go 仓库 (`atsf4g-go/atframework/libatbus-go`) 的逐项对比。
+> 正确性是第一优先级。Go 版本不需要内存通道 (`mem://`) 和共享内存通道 (`shm://`)。
 
 ---
 
-## 二、现有 Go 代码分析
+## 一、整体对比概要
 
-### 2.1 已实现部分 (impl/)
-
-#### atbus_node.go (~1700 行)
-- ✅ Node 结构体定义及基础字段
-- ✅ 状态管理 (NodeState, NodeFlag)
-- ✅ 配置管理 (NodeConfigure)
-- ✅ 事件回调框架 (NodeEventHandleSet)
-- ✅ 拓扑管理基础 (TopologyRegistry)
-- ✅ 部分 API 实现:
-  - `Init` - **待实现**
-  - `ReloadCrypto` - ✅ 已实现
-  - `ReloadCompression` - ✅ 已实现（当前返回码疑似错误）
-  - `Start/StartWithConfigure` - 部分实现
-  - `Reset` - **待实现**
-  - `Proc` - **待实现**
-  - `Poll` - **待实现**
-  - `Listen` - 骨架实现，需完善
-  - `Connect/ConnectWithEndpoint` - 骨架实现，需完善
-  - `Disconnect` - ✅ 已实现
-  - `SendData/SendDataWithOptions` - 部分实现（依赖 SendDataMessage）
-  - `SendCustomCommand` - ✅ 已实现
-  - `GetPeerChannel` - ✅ 已实现
-  - 各种 Getter/Setter - ✅ 已实现
-  - 事件回调 On* 系列 - ✅ 已实现
-- ❌ 缺失:
-  - SendDataMessage / SendCtrlMessage
-  - 消息派发逻辑 (`DispatchAllSelfMessages`)
-  - 完整的 `Proc` 循环
-  - ping/pong 定时器处理
-  - 连接超时管理
-  - `GetContext`
-  - `removeConnectionTimer`
-
-#### atbus_connection.go (~165 行)
-- ✅ Connection 结构体定义
-- ✅ 状态管理 (ConnectionState, ConnectionFlag)
-- ✅ `CreateConnection` 骨架
-- ❌ **核心方法待实现**:
-  - `Reset` - 骨架实现
-  - `Proc` - TODO
-  - `Listen` - TODO
-  - `Connect` - TODO
-  - `Disconnect` - TODO
-  - `Push` - TODO
-  - IO 回调集成
-
-#### atbus_endpoint.go (~590 行)
-- ✅ Endpoint 结构体定义
-- ✅ 连接管理 (AddConnection/RemoveConnection)
-- ✅ 监听地址管理
-- ❌ `CreateEndpoint` 返回 nil (待实现)
-- ❌ ping timer 相关逻辑待完善
-
-#### atbus_connection_context.go
-- ✅ 加密握手上下文
-- ✅ 密钥交换支持
-
-#### atbus_topology.go
-- ✅ 拓扑关系管理
-- ✅ TopologyRegistry 实现
-
-### 2.2 类型定义 (types/)
-- ✅ atbus_node.go - Node 接口及配置
-- ✅ atbus_connection.go - Connection 接口
-- ✅ atbus_endpoint.go - Endpoint 接口
-- ✅ atbus_topology.go - 拓扑类型
-- ✅ atbus_message.go - 消息类型
-- ✅ channel_address.go - 地址解析接口
-
-### 2.3 channel/ 目录
-- ✅ utility/ - 地址解析工具
-- ❌ io_stream/ - **目录缺失，需实现**
+| 模块 | C++ | Go | 实现完成度 | 备注 |
+|------|-----|-----|-----------|------|
+| **atbus_node** | atbus_node.h/cpp | impl/atbus_node.go + types/atbus_node.go | ~95% | 少量缺失，见下 |
+| **atbus_endpoint** | atbus_endpoint.h/cpp | impl/atbus_endpoint.go + types/atbus_endpoint.go | ~98% | 基本完整 |
+| **atbus_connection** | atbus_connection.h/cpp | impl/atbus_connection.go + types/atbus_connection.go | ~95% | 缺少部分状态回调 |
+| **atbus_connection_context** | atbus_connection_context.h/cpp | impl/atbus_connection_context.go + types/atbus_connection_context.go | ~95% | XXTEA 缺失(P1)，缺 IsCompressionAlgorithmSupported |
+| **atbus_message_handler** | atbus_message_handler.h/cpp | message_handle/atbus_message_handler.go | ~97% | 功能一致，有 2 个 Bug 待修 |
+| **atbus_topology** | atbus_topology.h/cpp | impl/atbus_topology.go + types/atbus_topology.go | ~100% | 接口完全对齐 |
+| **channel_io_stream** | channel_io_stream.cpp | channel/io_stream/ | ~100% | 完整 |
+| **channel_utility** | channel_utility.cpp | channel/utility/ | ~100% | 完整 |
+| **buffer** | buffer.h/cpp | buffer/ | ~100% | 完整 |
+| **error_code** | libatbus_error.h/cpp | error_code/ | ~100% | 完整 |
+| **protocol** | libatbus_protocol.proto | protocol/ | ~100% | 完整，proto 一致 |
+| **channel_mem** | channel_mem.cpp | N/A | 不需要 | Go 不实现 |
+| **channel_shm** | channel_shm.cpp | N/A | 不需要 | Go 不实现 |
 
 ---
 
-## 三、C++ 核心功能分析
+## 二、功能缺失详细分析
 
-### 3.1 atbus_node (include/atbus_node.h + src/atbus_node.cpp, ~3700行)
+### 2.1 atbus_node 功能缺失
 
-#### 核心数据结构
-```cpp
-struct conf_t {
-    adapter::loop_t *ev_loop;
-    std::string upstream_address;
-    std::unordered_map<std::string, std::string> topology_labels;
-    int32_t loop_times;              // 消息循环次数限制
-    int32_t ttl;                     // 消息转发跳转限制
-    std::chrono::microseconds first_idle_timeout;
-    std::chrono::microseconds ping_interval;
-    std::chrono::microseconds retry_interval;
-    size_t fault_tolerant;
-    size_t message_size;
-    size_t receive_buffer_size;
-    size_t send_buffer_size;
-    // 加密/压缩配置...
-};
+#### 2.1.1 `start_conf_t` / `StartWithConfigure` 对齐检查
 
-struct evt_timer_t {
-    std::chrono::system_clock::time_point tick;
-    std::chrono::system_clock::time_point upstream_op_timepoint;
-    timer_desc_ls<const endpoint*, weak_ptr<endpoint>>::type ping_list;
-    timer_desc_ls<std::string, connection::ptr_t>::type connecting_list;
-    std::list<endpoint::ptr_t> pending_endpoint_gc_list;
-    std::list<connection::ptr_t> pending_connection_gc_list;
-};
-```
+- C++ `start()` 接受 `start_conf_t` 参数，包含 `timer_sec`/`timer_usec` 时间戳
+- Go 已有 `StartWithConfigure(conf *StartConfigure)`，`StartConfigure` 包含 `TimerTimepoint`
+- **状态**: ✅ 已实现
 
-#### 关键方法
-1. **init()** - 初始化节点配置、创建 self endpoint、分配静态缓冲区
-2. **start()** - 启动节点，连接上游
-3. **reset()** - 清理所有连接和 endpoint，执行 GC
-4. **proc()** - 主循环：
-   - 处理所有 proc_connection
-   - 处理上游超时/重连
-   - 处理 ping 定时器
-   - 处理连接超时
-   - 执行 GC
-5. **poll()** - 执行一次 libuv 事件循环
-6. **listen()** - 创建监听连接
-7. **connect()** - 创建出站连接
-8. **send_data() / send_data_message()** - 发送数据消息
-9. **send_ctrl_message()** - 发送控制消息
-10. **get_peer_channel()** - 查找目标通道
-11. **on_receive_message()** - 消息接收处理入口
+#### 2.1.2 `default_conf()` 默认值对齐
 
-### 3.2 atbus_connection (include/atbus_connection.h + src/atbus_connection.cpp)
+- C++ `node::default_conf()` 设置默认参数
+- Go `SetDefaultNodeConfigure()` 存在
+- **任务**: 逐项对比默认值是否一致
+  - `loop_times`: C++ = 128 → Go 需确认
+  - `ttl`: C++ = 16 → Go 需确认
+  - `backlog`: C++ = 256 → Go 需确认
+  - `first_idle_timeout`: C++ = 30s → Go 需确认
+  - `ping_interval`: C++ = 60s → Go 需确认
+  - `retry_interval`: C++ = 3s → Go 需确认
+  - `fault_tolerant`: C++ = 3 → Go 需确认
+  - `access_token_max_number`: C++ = 5 → Go 需确认
+  - `crypto_key_refresh_interval`: C++ = 1h → Go 需确认
+  - `message_size`: C++ = 262144 (256KB) → Go 需确认
+  - `send_buffer_size`: C++ = 2MB → Go 需确认
+  - `receive_buffer_size`: C++ = 8MB → Go 需确认
 
-#### 核心数据结构
-```cpp
-struct connection_data_t {
-    union shared_t {
-        conn_data_mem mem;  // 内存通道 (Go 不需要)
-        conn_data_shm shm;  // 共享内存通道 (Go 不需要)
-        conn_data_ios ios_fd;  // IO流通道 (Go 需要)
-    };
-    proc_fn_t proc_fn;   // 处理函数指针
-    free_fn_t free_fn;   // 释放函数指针
-    push_fn_t push_fn;   // 发送函数指针
-};
-```
+#### 2.1.3 `send_data` 返回值差异
 
-#### 关键方法
-1. **create()** - 创建连接，根据协议类型初始化不同的通道
-2. **listen()** - 监听地址
-3. **connect()** - 连接到目标
-4. **push()** - 发送数据
-5. **proc()** - 处理连接数据 (内存通道专用)
-6. **reset()** - 重置连接
+- C++ `send_data()` 返回 `int` (error code)
+- Go `SendData()` 返回 `ErrorType`
+- **状态**: ✅ 语义等价
 
-#### iostream 回调 (Go 需要转为 goroutine)
-- `iostream_on_listen_cb` - 监听成功
-- `iostream_on_connected_cb` - 连接建立
-- `iostream_on_receive_cb` - 数据接收
-- `iostream_on_accepted` - 接受新连接
-- `iostream_on_connected` - 主动连接成功
-- `iostream_on_disconnected` - 连接断开
-- `iostream_on_written` - 写入完成
+#### 2.1.4 `get_peer_channel()` 签名差异
 
-### 3.3 channel_io_stream (src/channel_io_stream.cpp, ~2040行)
+- C++ 版本:
+  ```cpp
+  ATBUS_ERROR_TYPE get_peer_channel(bus_id_t tid, get_connection_fn_t fn,
+      endpoint **ep_out, connection **conn_out,
+      topology_peer::ptr_t *next_hop_peer, const get_peer_options_t &options)
+  ```
+- Go 版本:
+  ```go
+  GetPeerChannel(tid BusIdType, fn func(from, to Endpoint) Connection,
+      options *NodeGetPeerOptions) (ErrorType, Endpoint, Connection, TopologyPeer)
+  ```
+- **状态**: ✅ 语义等价（Go 用多返回值代替出参）
 
-#### 核心功能
-1. **io_stream_init()** - 初始化通道
-2. **io_stream_close()** - 关闭通道
-3. **io_stream_run()** - 运行事件循环
-4. **io_stream_listen()** - 监听地址 (TCP/Unix/Pipe)
-5. **io_stream_connect()** - 连接目标
-6. **io_stream_send()** - 发送数据
-7. **io_stream_disconnect()** - 断开连接
+#### 2.1.5 Shutdown 与 FatalShutdown 行为
 
-#### 数据帧格式
-```
-+----------------+----------------+----------------+
-| Hash (4 bytes) | Length (varint)| Payload        |
-+----------------+----------------+----------------+
-```
+- C++ `reset()` 直接重置节点
+- Go 有 `Shutdown(reason)` 和 `FatalShutdown(ep, conn, code, err)`
+- **任务**: 确认 Go 的 `Shutdown` 是否触发 `on_node_down` 回调、等待 `on_node_down` 返回非零时延迟 reset（与 C++ 行为一致）
 
-#### 地址支持
-- `ipv4://host:port` - IPv4/IPv6 TCP
-- `ipv6://host:port` - IPv4/IPv6 TCP
-- `atcp://host:port` - IPv4/IPv6 TCP
-- `dns://host:port` - DNS 解析后的 TCP
-- `unix://path` - Unix domain socket
-- `pipe://path` - Named pipe (类似 unix)
+#### 2.1.6 Poll 行为
 
----
+- C++ `poll()` 调用底层 `uv_run(loop, UV_RUN_NOWAIT)`
+- Go `Poll()` 基于 goroutine 模型，不需要显式 poll
+- **状态**: ✅ by design。Go 的 goroutine 模型使 poll 无需与 C++ 完全对等，当前行为是设计预期
 
-## 四、C++ 单元测试分析
+### 2.2 atbus_endpoint 功能缺失
 
-### 4.1 atbus_node_setup_test.cpp
-| 测试用例 | 描述 | 状态 |
-|----------|------|------|
-| override_listen_path | 测试覆盖已存在的监听路径 | 待实现 |
-| crypto_algorithms | 测试加密算法解析 | 待实现 |
-| compression_algorithms | 测试压缩算法解析 | 待实现 |
+#### 2.2.1 `watch()` 资源持有
 
-### 4.2 atbus_node_reg_test.cpp (~2233行)
-| 测试用例 | 描述 | 状态 |
-|----------|------|------|
-| reset_and_send_tcp | 主动reset流程 + TCP收发 | 待实现 |
-| reg_and_send_unix | Unix socket 注册和收发 | 待实现 |
-| reg_with_different_access_token | 不同 access token 注册 | 待实现 |
-| reconnect_same_addr | 同地址重连测试 | 待实现 |
-| reg_timeout_connection | 连接超时测试 | 待实现 |
-| reg_cancel_before_connected | 连接前取消 | 待实现 |
-| ... | (更多测试用例) | 待实现 |
+- C++ `endpoint::watch()` 返回 `strong_rc_ptr` 防止被 GC
+- Go 没有手动引用计数概念，依赖 GC
+- **状态**: ✅ 不需要实现（Go GC 管理生命周期）
 
-### 4.3 atbus_node_msg_test.cpp (~2279行)
-| 测试用例 | 描述 | 状态 |
-|----------|------|------|
-| send_to_self | 发送给自己 | 待实现 |
-| send_to_sibling | 发送给兄弟节点 | 待实现 |
-| send_data_forward | 数据转发 | 待实现 |
-| send_with_router | 带路由转发 | 待实现 |
-| custom_command | 自定义命令 | 待实现 |
-| ping_pong | ping/pong 测试 | 待实现 |
-| ... | (更多测试用例) | 待实现 |
+#### 2.2.2 统计数据方法对齐
 
-### 4.4 atbus_node_relationship_test.cpp
-| 测试用例 | 描述 | 状态 |
-|----------|------|------|
-| copy_conf | 配置复制 | 待实现 |
-| child_endpoint_opr | 子节点端点操作 | 待实现 |
+C++ endpoint 统计方法与 Go 对比:
 
-### 4.5 atbus_endpoint_test.cpp
-| 测试用例 | 描述 | 状态 |
-|----------|------|------|
-| connection_basic | 连接基础测试 | 待实现 |
-| endpoint_basic | 端点基础测试 | 待实现 |
-| is_child | 子节点关系判断 | 待实现 |
-| get_connection | 获取连接测试 | 待实现 |
-| address | 地址解析测试 | 待实现 |
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `get_stat_push_start_times()` | `GetStatisticPushStartTimes()` | ✅ |
+| `get_stat_push_start_size()` | `GetStatisticPushStartSize()` | ✅ |
+| `get_stat_push_success_times()` | `GetStatisticPushSuccessTimes()` | ✅ |
+| `get_stat_push_success_size()` | `GetStatisticPushSuccessSize()` | ✅ |
+| `get_stat_push_failed_times()` | `GetStatisticPushFailedTimes()` | ✅ |
+| `get_stat_push_failed_size()` | `GetStatisticPushFailedSize()` | ✅ |
+| `get_stat_pull_times()` | `GetStatisticPullTimes()` | ✅ |
+| `get_stat_pull_size()` | `GetStatisticPullSize()` | ✅ |
+| `get_stat_created_time()` | `GetStatisticCreatedTime()` | ✅ |
 
----
+### 2.3 atbus_connection 功能缺失
 
-## 五、实现计划
+#### 2.3.1 `proc()` 方法对齐
 
-### Phase 1: IO Stream 通道实现 (预估: 3-5天)
+- C++ `connection::proc(node, time_point)` 处理一帧
+- Go `Connection.Proc()` 不接受时间参数
+- **状态**: ✅ by design。Go 不支持 mem/shm 通道，无需通过 proc 传递时间戳驱动底层通道轮询
 
-#### 5.1.1 创建 channel/io_stream/channel_io_stream.go
+#### 2.3.2 `unpack()` 静态方法
+
+- C++ `connection::unpack(conn, message, data)` 反序列化
+- Go 通过 `ConnectionContext.UnpackMessage()` 实现
+- **状态**: ✅ 等价
+
+#### 2.3.3 内存/共享内存通道回调
+
+- C++ 有 `mem_proc_fn`, `mem_free_fn`, `mem_push_fn`, `shm_proc_fn`, `shm_free_fn`, `shm_push_fn`
+- **状态**: 不需要（Go 版本不支持 `mem://` / `shm://` 通道）
+
+### 2.4 atbus_connection_context 功能缺失
+
+#### 2.4.1 XXTEA 加密
+
+- C++ 支持 `ATBUS_CRYPTO_ALGORITHM_XXTEA`
+- Go 未实现 XXTEA
+- **优先级**: P1 — 跨语言互通必需
+- **实现计划**:
+
+  **Step 1: 在 `atframe-utils-go/algorithm/crypto/` 中实现 XXTEA**
+
+  参考 C++ 实现 `atframe_utils/src/algorithm/xxtea.cpp` 和 `atframe_utils/include/algorithm/xxtea.h`。
+
+  算法要点:
+  - 128-bit 密钥 (`[4]uint32`)
+  - 大端字节序 (big-endian) 读写 `uint32`
+  - Delta = `0x9e3779b9`
+  - 加密轮数: `rounds = 6 + 52/n` (n = block 数量, 最少 2)
+  - 最小 8 字节块 (2 × uint32)
+  - 输入自动 pad 到 4 字节对齐: `real_len = ((ilen - 1) | 0x03) + 1`
+  - MX 混合函数: `(((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[((p & 3) ^ e)] ^ z)))`
+
+  API 设计 (对齐 C++):
+  ```go
+  // atframe-utils-go/algorithm/crypto/xxtea.go
+  type XXTEAKey struct {
+      Data [4]uint32
+  }
+
+  func XXTEASetup(key *XXTEAKey, keyBuf []byte) error     // 从 16 字节 buffer 初始化 key
+  func XXTEAEncrypt(key *XXTEAKey, data []byte) ([]byte, error)  // 就地或返回新 buffer
+  func XXTEADecrypt(key *XXTEAKey, data []byte) ([]byte, error)
+  ```
+
+  **Step 2: 单元测试**
+
+  Reference C++ test vectors from `atframe_utils/test/case/xxtea_test.cpp`:
+
+  | Key (hex) | Plaintext (hex) | Ciphertext (hex) |
+  |-----------|-----------------|------------------|
+  | 00010203 04050607 08090a0b 0c0d0e0f | 01234567 89abcdef | 96c3b4fa a72ea28c |
+  | 00010203 04050607 08090a0b 0c0d0e0f | 00000000 00000000 | 946a4137 5b06e676 |
+  | 00010203 04050607 08090a0b 0c0d0e0f | ffffffff ffffffff | 3e009e37 07669fc1 |
+  | 00000000 00000000 00000000 00000000 | 01234567 89abcdef | 720e83a3 9d415508 |
+  | 00000000 00000000 00000000 00000000 | 00000000 00000000 | e14ed316 1e89baa5 |
+  | 00000000 00000000 00000000 00000000 | ffffffff ffffffff | 42d06235 0d2c6b05 |
+
+  测试用例:
+  - `TestXXTEABasic`: 使用上述 6 组向量做加密/解密往返验证
+  - `TestXXTEAInputOutput`: 使用独立输入/输出 buffer 验证
+  - `TestXXTEAEdgeCases`: 空输入、奇数长度输入 pad 验证
+
+  **Step 3: 集成到 libatbus-go**
+
+  在 `impl/atbus_connection_context.go` 的加密分支中添加 `ATBUS_CRYPTO_ALGORITHM_XXTEA` case，
+  调用 `atframe-utils-go/algorithm/crypto/xxtea.go` 中的实现。
+
+#### 2.4.2 `internal_padding_temporary_buffer_block()` 对齐
+
+- C++ 有缓冲区对齐计算
+- Go 通过 `StaticBufferBlock` 内部处理
+- **状态**: ✅ 逻辑等价
+
+#### 2.4.3 ChaCha20（非 AEAD）
+
+- C++ 支持 `ATBUS_CRYPTO_ALGORITHM_CHACHA20`（=31，非 AEAD 纯流密码）
+- Go 需确认是否支持纯 ChaCha20（不带 Poly1305）
+- **任务**: 验证 Go 的 `golang.org/x/crypto` 是否支持纯 ChaCha20 流加密，并确认跨语言兼容性
+
+#### 2.4.4 `is_compression_algorithm_supported()` 公开方法
+
+- C++ 有静态查询方法 `is_compression_algorithm_supported(algo)`
+- Go 缺少独立的公开查询方法
+- **任务** (P1): 添加公开函数 `IsCompressionAlgorithmSupported(algo ATBUS_COMPRESSION_ALGORITHM_TYPE) bool`，
+  放在 `impl/atbus_connection_context.go` 中，与 `UpdateCompressionAlgorithm()` 配套使用。
+  实现逻辑：根据编译期可用的压缩库返回 true/false（Zstd, LZ4, Snappy, Zlib）
+
+### 2.5 atbus_topology 功能对比
+
+> 经重新核查 C++ `atbus_topology.h` 后更正。前一版本此节有多处接口签名错误。
+
+#### 2.5.1 TopologyRegistry 接口完全对照
+
+C++ `topology_registry` 公开方法与 Go `TopologyRegistry` 一一对应:
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `static ptr_t create()` | `CreateTopologyRegistry()` | ✅ |
+| `topology_peer::ptr_t get_peer(bus_id_t) const` | `GetPeer(busId) TopologyPeer` | ✅ |
+| `void remove_peer(bus_id_t)` | `RemovePeer(targetBusId)` | ✅ |
+| `bool update_peer(bus_id_t targetId, bus_id_t upstreamId, topology_data::ptr_t data)` | `UpdatePeer(targetBusId, upstreamBusId, data) bool` | ✅ 签名一致 |
+| `topology_relation_type get_relation(bus_id_t from, bus_id_t to, topology_peer::ptr_t *nextHop) const` | `GetRelation(from, to) (TopologyRelationType, TopologyPeer)` | ✅ Go 用多返回值代替出参 |
+| `bool foreach_peer(fn) const` | `ForeachPeer(fn) bool` | ✅ |
+| `static bool check_policy(const topology_policy_rule&, const topology_data&, const topology_data&)` | `CheckPolicy(rule, fromData, toData) bool` | ✅ C++ 是 static，Go 是 instance method，功能等价 |
+
+**结论**: TopologyRegistry C++/Go 接口完全对齐，无缺失方法。
+前一版本中提到的 `update_upstream(from, to)`、`clear_upstream(from)`、`check_cycle_safe(from, to)` **在 C++ 中不存在**（这些功能均已整合到 `update_peer` 内部）。
+
+#### 2.5.2 TopologyPeer 接口对照
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `bus_id_t get_bus_id() const` | `GetBusId() BusIdType` | ✅ |
+| `const topology_peer::ptr_t& get_upstream() const` | `GetUpstream() TopologyPeer` | ✅ |
+| `const topology_data& get_topology_data() const` | `GetTopologyData() *TopologyData` | ✅ |
+| `bool contains_downstream(bus_id_t) const` | `ContainsDownstream(busId) bool` | ✅ |
+| `bool foreach_downstream(fn) const` | `ForeachDownstream(fn) bool` | ✅ |
+
+**结论**: TopologyPeer C++/Go 接口完全对齐。
+
+#### 2.5.3 Proactive vs Passive Peer 行为
+
+- C++ 内部有 `set_proactively_added(bool)` / `get_proactively_added()` 控制孤立 peer 清理策略
+- Go 内部也有 `setProactivelyAdded(v bool)` / `getProactivelyAdded() bool`
+- **状态**: ✅ 内部行为已对齐
+
+### 2.6 atbus_message_handler 功能对比
+
+> 经重新核查，C++ `atbus_message_handler.h/cpp` 对应 Go `message_handle/atbus_message_handler.go`。
+> 两者功能**基本一致**，但发现 2 个 Go 侧 Bug。
+
+#### 2.6.0 Go 侧已发现 Bug
+
+**Bug 1: `getConnectionBinding()` 无限递归**
+
 ```go
-// 核心结构
-type IoStreamChannel struct {
-    conf        IoStreamConf
-    ctx         context.Context
-    cancel      context.CancelFunc
-    listeners   map[string]net.Listener
-    connections map[string]*IoStreamConnection
-    callbacks   IoStreamCallbacks
-    mu          sync.RWMutex
+// 当前代码 (错误):
+func getConnectionBinding(conn types.Connection) types.Endpoint {
+    return getConnectionBinding(conn) // 无限递归!
 }
-
-type IoStreamConnection struct {
-    channel  *IoStreamChannel
-    conn     net.Conn
-    address  ChannelAddress
-    status   ConnectionState
-    readBuf  *buffer.DynamicBuffer
-    writeBuf chan []byte
-    // ...
-}
-
-// 核心接口
-func NewIoStreamChannel(ctx context.Context, conf *IoStreamConf) *IoStreamChannel
-func (c *IoStreamChannel) Listen(addr string, callback IoStreamCallback) error
-func (c *IoStreamChannel) Connect(addr string, callback IoStreamCallback) error
-func (c *IoStreamChannel) Send(conn *IoStreamConnection, data []byte) error
-func (c *IoStreamChannel) Close() error
-```
-
-#### 5.1.2 实现数据帧编解码
-- 参考 C++ 的 hash + varint length + payload 格式
-- 使用 murmur3_x86_32(hash seed = 0) 对 **payload** 计算校验
-- varint 采用 libatbus 自定义 vint（`buffer.ReadVint/WriteVint`），不是 protobuf 标准 varint
-- 接收端需统计 hash/size 校验失败次数，超过 `MaxReadCheck*` 阈值应断开连接
-- 实现 `PackFrame()` 和 `UnpackFrame()`
-
-#### 5.1.3 实现地址解析
-- 支持 ipv4/ipv6/atcp/dns/unix/pipe 协议
-- 复用现有 channel/utility 代码
-
-### Phase 2: Connection 实现完善 (预估: 2-3天)
-
-#### 5.2.1 补全 impl/atbus_connection.go
-```go
-func (c *Connection) Listen() ErrorType {
-    // 1. 获取 IoStreamChannel
-    // 2. 调用 channel.Listen()
-    // 3. 设置回调处理接受新连接
-    // 4. 更新状态
-}
-
-func (c *Connection) Connect() ErrorType {
-    // 1. 获取 IoStreamChannel
-    // 2. 调用 channel.Connect()
-    // 3. 设置回调处理连接结果
-    // 4. 更新状态，加入 connecting_list
-}
-
-func (c *Connection) Push(buffer []byte) ErrorType {
-    // 1. 打包数据帧
-    // 2. 调用 channel.Send()
-    // 3. 更新统计
-}
-
-func (c *Connection) Proc() ErrorType {
-    // iostream 模式不需要主动 proc，由 goroutine 驱动
-    return EN_ATBUS_ERR_SUCCESS
-}
-```
-
-#### 5.2.2 实现 iostream 回调转换
-```go
-// 将 C++ 回调模式转为 Go channel/goroutine 模式
-type connectionEventHandler struct {
-    onAccepted    chan *IoStreamConnection
-    onConnected   chan *IoStreamConnection
-    onReceive     chan receiveEvent
-    onDisconnect  chan disconnectEvent
-}
-```
-
-### Phase 3: Node 核心功能完善 (预估: 3-4天)
-
-#### 5.3.1 实现 Node.Init()
-```go
-func (n *Node) Init(id BusIdType, conf *NodeConfigure) ErrorType {
-    // 1. 配置初始化
-    // 2. 创建 IoStreamChannel
-    // 3. 创建 self endpoint
-    // 4. 初始化拓扑注册表
-    // 5. 分配消息缓冲区
-    // 6. 设置状态为 Inited
-}
-```
-
-#### 5.3.2 实现 Node.Proc()
-```go
-func (n *Node) Proc(now time.Time) ErrorType {
-    // 1. 更新 tick
-    // 2. 处理 self messages (发给自己的消息)
-    // 3. 处理上游连接超时/重连
-    // 4. 处理 ping 定时器
-    // 5. 处理连接超时
-    // 6. 执行 GC
-}
-```
-
-#### 5.3.3 实现 Node.Reset()
-```go
-func (n *Node) Reset() ErrorType {
-    // 1. 设置 Resetting 标志
-    // 2. 派发所有 self messages
-    // 3. 断开所有连接
-    // 4. 清理所有 endpoint
-    // 5. 释放 IoStreamChannel
-    // 6. 重置状态
-}
-```
-
-#### 5.3.4 完善消息发送
-```go
-func (n *Node) SendDataMessage(tid BusIdType, msg *Message, options *NodeSendDataOptions) (ErrorType, Endpoint, Connection) {
-    // 1. 获取目标通道 (GetPeerChannel)
-    // 2. 序列化消息
-    // 3. 调用 connection.Push()
-    // 4. 处理发送结果
-}
-```
-
-### Phase 4: Endpoint 完善 (预估: 1-2天)
-
-#### 5.4.1 实现 CreateEndpoint()
-```go
-func CreateEndpoint(owner *Node, id BusIdType, pid int32, hostname string) *Endpoint {
-    ep := &Endpoint{
-        id:       id,
-        pid:      pid,
-        hostname: hostname,
-        owner:    owner,
-        dataConn: make([]Connection, 0),
-        stat:     endpointStatistic{CreatedTime: time.Now()},
+// 应修正为:
+func getConnectionBinding(conn types.Connection) types.Endpoint {
+    if conn == nil {
+        return nil
     }
-    return ep
+    return conn.GetBinding()
 }
 ```
 
-#### 5.4.2 完善 ping/pong 定时器
+**Bug 2: `SendTransferResponse()` 错误的 body type 检查**
+
 ```go
-func (e *Endpoint) AddPingTimer() bool {
-    // 添加到 node 的 ping_list
-}
-
-func (e *Endpoint) ClearPingTimer() {
-    // 从 node 的 ping_list 移除
-}
-
-func (e *Endpoint) UpdatePingStatistic(delay time.Duration) {
-    // 更新 ping 延迟统计
-}
+// 当前代码检查的是 kNodeRegisterReq/Rsp，应该检查 kDataTransformReq/Rsp
 ```
 
-### Phase 5: 单元测试 (预估: 4-5天)
+- **任务** (P0): 修复上述 2 个 Bug
 
-#### 5.5.1 测试文件结构
-```
-impl/
-├── atbus_node_test.go           # 对应 atbus_node_setup_test.cpp
-├── atbus_node_reg_test.go       # 对应 atbus_node_reg_test.cpp
-├── atbus_node_msg_test.go       # 对应 atbus_node_msg_test.cpp
-├── atbus_node_relationship_test.go  # 对应 atbus_node_relationship_test.cpp
-├── atbus_endpoint_test.go       # 对应 atbus_endpoint_test.cpp
-└── testdata/                    # 测试数据
-```
+#### 2.6.1 函数逐项对照
 
-#### 5.5.2 测试辅助工具
-```go
-// test_utils.go
-func SetupTestNode(id BusIdType, port int) (*Node, func())
-func WaitUntil(condition func() bool, timeout time.Duration) bool
-func CreateTestConf() *NodeConfigure
-```
+| C++ 函数 | Go 函数 | 状态 |
+|----------|---------|------|
+| `unpack_message(connCtx, target, data, max_body_size)` | `UnpackMessage(connCtx, data, maxBodySize)` | ✅ |
+| `pack_message(connCtx, m, version, random, max_size)` | `PackMessage(connCtx, msg, version, maxSize)` | ✅ Go 省略 random_engine |
+| `get_body_name(body_case)` | `GetBodyName(bodyCase)` | ✅ |
+| `generate_access_data(...)` | `GenerateAccessData(...)` / `GenerateAccessDataWithTimestamp(...)` | ✅ |
+| `make_access_data_plaintext(...)` [crypto overload] | `MakeAccessDataPlaintextFromHandshake(...)` | ✅ |
+| `make_access_data_plaintext(...)` [custom_cmd overload] | `MakeAccessDataPlaintextFromCustomCommand(...)` | ✅ |
+| `calculate_access_data_signature(...)` | `CalculateAccessDataSignature(...)` | ✅ |
+| `send_message(n, conn, msg)` | `SendMessage(n, conn, m)` | ✅ |
+| `send_ping(n, conn, seq)` | `SendPing(n, conn, seq)` | ✅ |
+| `send_handshake_confirm(n, conn, seq)` | `SendHandshakeConfirm(n, conn, seq)` | ✅ |
+| `send_register(id, n, conn, ret, seq)` | `SendRegister(bodyType, n, conn, err, seq)` | ✅ |
+| `send_transfer_response(n, m, ret)` | `SendTransferResponse(n, m, err)` | ⚠️ Bug 2 |
+| `send_custom_command_response(...)` | `SendCustomCommandResponse(...)` | ✅ |
+| `dispatch_message(n, conn, m, status, err)` | `DispatchMessage(n, conn, m, status, err)` | ✅ |
+| `on_recv_data_transfer_req(...)` | `onRecvDataTransferReq(...)` | ✅ |
+| `on_recv_data_transfer_rsp(...)` | `onRecvDataTransferRsp(...)` | ✅ |
+| `on_recv_custom_command_req(...)` | `onRecvCustomCommandReq(...)` | ✅ |
+| `on_recv_custom_command_rsp(...)` | `onRecvCustomCommandRsp(...)` | ✅ |
+| `on_recv_node_register_req(...)` | `onRecvNodeRegisterReq(...)` | ✅ |
+| `on_recv_node_register_rsp(...)` | `onRecvNodeRegisterRsp(...)` | ✅ |
+| `on_recv_node_ping(...)` | `onRecvNodePing(...)` | ✅ |
+| `on_recv_node_pong(...)` | `onRecvNodePong(...)` | ✅ |
+| `on_recv_handshake_confirm(...)` | `onRecvHandshakeConfirm(...)` | ✅ |
+| `accept_node_registration(...)` | `acceptNodeRegistration(...)` | ✅ |
+| `calculate_channel_address_priority(...)` | `calculateChannelAddressPriority(...)` | ✅ |
+| `_get_body_type_name(cmd)` | 无独立函数 | ✅ Go 通过 `GetBodyName()` + 反射实现等价功能 |
 
-#### 5.5.3 测试用例实现顺序
-1. **基础测试** - endpoint_basic, connection_basic, address
-2. **节点设置** - crypto_algorithms, compression_algorithms
-3. **注册流程** - reset_and_send_tcp, reg_and_send_unix
-4. **消息收发** - send_to_self, send_to_sibling, send_data_forward
-5. **高级功能** - custom_command, ping_pong, 拓扑关系
-6. **边界情况** - 超时、重连、错误处理
-
-### Phase 6: 跨语言互通测试 (预估: 2-3天) ⭐
-
-#### 5.6.1 测试文件结构
-```
-integration/
-├── crosslang_reg_test.go        # 跨语言注册测试
-├── crosslang_msg_test.go        # 跨语言消息收发测试
-├── crosslang_crypto_test.go     # 跨语言加密通道测试
-├── crosslang_route_test.go      # 跨语言路由转发测试
-└── crosslang_test_utils.go      # 测试辅助工具
-```
-
-> **注意**: 跨语言互通测试使用 C++ 的 atapp echo server (atsf4g-co 项目提供)，Go 项目不需要编译 C++ 代码。
-
-#### 5.6.2 互通测试场景
-| 测试 ID | 场景 | Go 角色 | C++ 角色 |
-|---------|------|---------|----------|
-| CL-001 | 基础注册 | 客户端 | 服务端(上游) |
-| CL-002 | 反向注册 | 服务端(上游) | 客户端 |
-| CL-003 | 消息收发 | 发送方 | 接收方 |
-| CL-004 | 消息收发 | 接收方 | 发送方 |
-| CL-005 | 路由转发 | 中间节点 | 源/目标 |
-| CL-006 | 加密通道 | 客户端 | 服务端 |
-| CL-007 | 自定义命令 | 发起方 | 响应方 |
-| CL-008 | Ping/Pong | 发起方 | 响应方 |
-
-#### 5.6.3 互通测试辅助工具
-```go
-// crosslang_test_utils.go
-
-// StartAtAppEchoServer 启动 C++ atapp echo server (来自 atsf4g-co 项目)
-// echoServerPath: atsf4g-co 编译产物中的 echosvr 可执行文件路径
-func StartAtAppEchoServer(echoServerPath string, busId uint64, listenAddr string) (*exec.Cmd, error)
-
-// WaitForServerReady 等待服务器就绪 (通过尝试连接检测)
-func WaitForServerReady(addr string, timeout time.Duration) error
-
-// StopServer 停止服务器进程
-func StopServer(cmd *exec.Cmd) error
-```
-
-#### 5.6.4 互通测试环境要求
-- 需要预先编译 atsf4g-co 项目的 echosvr
-- 通过环境变量 `ATBUS_CROSSLANG_ECHOSVR_PATH` 指定 echosvr 路径
-- 如未设置环境变量，跨语言测试将被跳过 (skip)
+**结论**: message_handle 包与 C++ message_handler **功能一致**，除 2 个 Bug 外无缺失。
 
 ---
 
-## 六、关键实现细节
+## 三、跨语言互通保障计划
 
-### 6.1 Go 与 C++ 的关键差异处理
+### 3.1 协议兼容性
 
-#### 6.1.1 事件循环
-```go
-// C++: uv_run(loop, UV_RUN_ONCE)
-// Go: 使用 goroutine + channel
+| 项目 | 状态 | 行动 |
+|------|------|------|
+| Protobuf .proto 文件一致 | ✅ 一致 | 持续同步 |
+| Varint 编码 | ✅ 算法一致 | 已有跨语言测试 |
+| 帧格式 `[CRC32(4B)][varint(payload_len)][payload]` | ✅ 一致 | 已有跨语言测试 |
+| 消息格式 `[varint(head_len)][protobuf_head][body]` | ✅ 一致 | 已有跨语言测试 |
+| Access Token HMAC-SHA256 签名 | ✅ 一致 | 已有跨语言测试 |
+| Access Token Plaintext 格式 | ✅ 一致 | 已有跨语言测试 |
 
-// 每个监听器一个 goroutine
-go func() {
-    for {
-        conn, err := listener.Accept()
-        if err != nil {
-            return
-        }
-        go handleConnection(conn)
-    }
-}()
+### 3.2 加密算法兼容性
 
-// 每个连接一个读 goroutine
-go func() {
-    for {
-        n, err := conn.Read(buf)
-        if err != nil {
-            onDisconnect(conn, err)
-            return
-        }
-        onReceive(conn, buf[:n])
-    }
-}()
-```
+| 算法 | C++ | Go | 跨语言互通 |
+|------|-----|-----|-----------|
+| AES-128-CBC | ✅ | ✅ | ✅ PKCS#7 padding |
+| AES-192-CBC | ✅ | ✅ | ✅ |
+| AES-256-CBC | ✅ | ✅ | ✅ |
+| AES-128-GCM | ✅ | ✅ | ✅ AEAD |
+| AES-192-GCM | ✅ | ✅ | ✅ |
+| AES-256-GCM | ✅ | ✅ | ✅ |
+| ChaCha20 | ✅ | ⚠️ 需验证 | ⚠️ 需验证纯 ChaCha20 |
+| ChaCha20-Poly1305 IETF | ✅ | ✅ | ✅ AEAD |
+| XChaCha20-Poly1305 IETF | ✅ | ✅ | ✅ AEAD |
+| XXTEA | ✅ | ❌ 未实现 | ❌ 不互通 |
 
-#### 6.1.2 Poll 实现
-```go
-func (n *Node) Poll() ErrorType {
-    // Go 中不需要显式 poll，网络 IO 由 runtime 调度
-    // Poll 主要用于处理 self 消息/GC/定时器收尾
-    return EN_ATBUS_ERR_SUCCESS
-}
-```
+### 3.3 密钥交换兼容性
 
-#### 6.1.3 并发安全
-```go
-// 关键数据结构需要加锁
-type Node struct {
-    mu sync.RWMutex
-    // ...
-}
+| 算法 | C++ | Go | 互通 |
+|------|-----|-----|------|
+| X25519 | ✅ | ✅ | ✅ |
+| SECP256R1 (P-256) | ✅ | ✅ | ✅ |
+| SECP384R1 (P-384) | ✅ | ✅ | ✅ |
+| SECP521R1 (P-521) | ✅ | ✅ | ✅ |
 
-// 或使用 sync/atomic 进行无锁操作
-func (n *Node) AllocateMessageSequence() uint64 {
-    return n.messageSequenceAllocator.Add(1)
-}
-```
+### 3.4 压缩算法兼容性
 
-### 6.2 消息帧格式 (与 C++ 保持一致 - 跨语言互通关键)
+| 算法 | C++ | Go | 互通 |
+|------|-----|-----|------|
+| Zstd | ✅ | ✅ | ✅ |
+| LZ4 | ✅ | ✅ | ✅ |
+| Snappy | ✅ | ✅ | ✅ |
+| Zlib | ✅ | ✅ | ✅ |
 
-> ⚠️ **此格式必须与 C++ 版本完全一致，否则无法互通！**
+### 3.5 KDF 兼容性
 
-```go
-const (
-    FRAME_HASH_SIZE = 4  // murmur3 hash (32-bit, little-endian)
-)
+| 算法 | C++ | Go | 互通 |
+|------|-----|-----|------|
+| HKDF-SHA256 | ✅ | ✅ | ✅ 需验证 salt/info 参数一致 |
 
-// 帧格式: [hash:4字节][length:varint][payload:N字节]
-// 
-// C++ 参考: channel_io_stream.cpp 中的 io_stream_send() 和接收逻辑
-// hash 算法: murmur3_x86_32( seed=0 ), **仅对 payload 计算**
-// Hash 字节序: 与 C++ memcpy(uint32_t) 一致，按 little-endian 写入/读取
-// length 编码: libatbus 自定义 vint (使用 buffer.ReadVint/WriteVint)
+### 3.6 跨语言测试数据
 
-func PackFrame(data []byte) []byte {
-    // 1. 计算 payload 长度的 varint 编码 (使用 buffer.WriteVint)
-    lenBuf := make([]byte, buffer.VintEncodedSize(uint64(len(data))))
-    lenN := buffer.WriteVint(uint64(len(data)), lenBuf)
-    
-    // 2. 组装: hash + length + data
-    frame := make([]byte, FRAME_HASH_SIZE+lenN+len(data))
-    copy(frame[FRAME_HASH_SIZE:], lenBuf[:lenN])
-    copy(frame[FRAME_HASH_SIZE+lenN:], data)
-    
-    // 3. 计算并填充 hash (对 payload 计算)
-    hash := murmur3.Sum32(data)
-    binary.LittleEndian.PutUint32(frame[:FRAME_HASH_SIZE], hash)
-    
-    return frame
-}
-
-func UnpackFrame(reader io.Reader) ([]byte, error) {
-    // 1. 读取 hash
-    hashBuf := make([]byte, FRAME_HASH_SIZE)
-    if _, err := io.ReadFull(reader, hashBuf); err != nil {
-        return nil, err
-    }
-    
-    // 2. 读取 length (varint，使用 buffer.ReadVint)
-    // 注意: 需要先读取足够的字节到缓冲区，再调用 buffer.ReadVint
-    length, bytesRead := buffer.ReadVint(headerBuf)
-    if bytesRead == 0 {
-        return nil, ErrInvalidFrame
-    }
-    
-    // 3. 读取 payload
-    data := make([]byte, length)
-    if _, err := io.ReadFull(reader, data); err != nil {
-        return nil, err
-    }
-    
-    // 4. 验证 hash (对 payload 计算)
-    // ...
-    
-    return data, nil
-}
-```
-
-### 6.3 Protobuf 消息兼容性 (跨语言互通关键)
-
-> ⚠️ **必须使用与 C++ 相同的 .proto 文件生成 Go 代码！**
-
-```
-C++ proto 文件位置: atframework/libatbus/include/libatbus_protocol.proto
-Go proto 文件位置: libatbus-go/protocol/
-
-确保以下一致性:
-1. 字段编号完全一致
-2. 字段类型完全一致  
-3. 枚举值完全一致
-4. 默认值处理一致
-```
-
-#### 关键消息结构
-| 消息类型 | 用途 | 跨语言注意点 |
-|----------|------|--------------|
-| `msg` | 顶层消息容器 | head + body oneof |
-| `msg_head` | 消息头 | version, type, sequence, source_bus_id |
-| `forward_data` | 数据转发 | from, to, router[], content, flags |
-| `node_register_req/rsp` | 节点注册 | bus_id, pid, hostname, access_key |
-| `ping_data` | 心跳 | time_point |
-| `access_data` | 认证数据 | algorithm, nonce, signature[] |
-
-### 6.4 加密握手兼容性 (跨语言互通关键)
-
-> ⚠️ **加密密钥交换必须与 C++ 使用完全相同的算法和参数！**
-
-支持的密钥交换算法 (必须与 C++ 一致):
-- `ATBUS_CRYPTO_KEY_EXCHANGE_X25519` - ECDH with X25519
-- `ATBUS_CRYPTO_KEY_EXCHANGE_SECP256R1` - ECDH with P-256
-- `ATBUS_CRYPTO_KEY_EXCHANGE_SECP384R1` - ECDH with P-384
-- `ATBUS_CRYPTO_KEY_EXCHANGE_SECP521R1` - ECDH with P-521
-
-支持的对称加密算法:
-- `ATBUS_CRYPTO_ALGORITHM_XXTEA`
-- `ATBUS_CRYPTO_ALGORITHM_AES_*_CBC/GCM`
-- `ATBUS_CRYPTO_ALGORITHM_CHACHA20*`
-
-```go
-// 握手流程必须与 C++ 完全一致:
-// 1. 客户端发送 node_register_req (包含公钥)
-// 2. 服务端回复 node_register_rsp (包含公钥 + 选定算法)
-// 3. 双方使用 ECDH 计算共享密钥
-// 4. 后续消息使用协商的对称加密算法
-```
-
-### 6.5 Access Token 验证 (跨语言互通关键)
-
-> ⚠️ **签名算法必须与 C++ 完全一致！**
-
-```go
-// C++ 参考: atbus_node.cpp 中的 check_access_hash()
-// 算法: HMAC-SHA256(token, plaintext)
-
-func CalculateAccessDataSignature(
-    accessKey *protocol.AccessData,
-    token []byte,
-    plainText string,
-) []byte {
-    // 必须与 C++ 的 message_handle::generate_access_data_for_* 完全一致
-    // 1. plainText 来自 MakeAccessDataPlaintextFromHandshake/CustomCommand
-    // 2. 使用 HMAC-SHA256(token, plainText)
-    // 3. 返回签名 (注意 token 可能截断到 32868 bytes)
-}
-```
+- C++ 通过 `atbus_connection_context_crosslang_generator.cpp` 生成二进制测试向量
+- C++ 通过 `atbus_access_data_crosslang_generator.cpp` 生成签名测试向量
+- **任务**: Go 测试需加载这些测试向量并验证解析/校验结果一致
 
 ---
 
-## 七、风险与依赖
+## 四、功能补全具体任务
 
-### 7.1 依赖项
-- `github.com/atframework/atframe-utils-go` - 工具库
-- `github.com/atframework/libatbus-go/protocol` - Protobuf 协议 **(必须与 C++ 同步)**
-- `github.com/atframework/libatbus-go/buffer` - 缓冲区算法 **(varint 已实现)**
-- `github.com/spaolacci/murmur3` (或类似) - Hash 计算 **(必须与 C++ 算法一致)**
-- `golang.org/x/crypto` - 加密算法支持
+### P0 (关键 - 影响正确性和跨语言互通)
 
-### 7.1.1 跨语言测试依赖
-- atsf4g-co 项目编译产物 (echosvr) - **不需要在 Go 项目中编译 C++**
-- 通过环境变量配置 echosvr 路径
+| 编号 | 任务 | 说明 | 涉及文件 |
+|------|------|------|---------|
+| P0-1 | 默认配置值对齐 | 逐项对比 `default_conf()` 与 `SetDefaultNodeConfigure()` 所有默认值，修正差异 | `types/atbus_common_types.go` |
+| P0-2 | HKDF 参数对齐验证 | 确认 HKDF-SHA256 的 salt, info 参数与 C++ 完全一致 | `impl/atbus_connection_context.go` |
+| P0-3 | 消息路由 TTL 行为对齐 | 确认 TTL 递减、检查、错误返回与 C++ 一致 | `impl/atbus_node.go`, `message_handle/` |
+| P0-4 | Access Token 时间容差 | 确认 ±300 秒容差与 C++ 一致 | `message_handle/atbus_message_handler.go` |
+| P0-5 | 注册流程 access token 校验 | 确认注册请求/响应中 access token 的编码、校验逻辑完整 | `message_handle/atbus_message_handler.go` |
+| P0-6 | Key Renegotiation 时序 | 确认 cipher staging / confirm 流程时序正确（server: stage until confirm; client: immediate） | `impl/atbus_connection_context.go` |
+| P0-7 | 控制消息不加密/不压缩 | 确认 register, ping/pong, handshake_confirm 消息绕过加密和压缩 | `impl/atbus_connection_context.go`, `message_handle/` |
+| P0-8 | 消息大小限制一致 | 检查 `message_size` 限制在 pack/unpack 中的执行方式与 C++ 一致 | `impl/atbus_connection_context.go` |
+| P0-9 | 修复 getConnectionBinding 无限递归 | `getConnectionBinding()` 调用自身导致栈溢出，需改为 `conn.GetBinding()` | `message_handle/atbus_message_handler.go` |
+| P0-10 | 修复 SendTransferResponse body type 检查 | 当前检查 `kNodeRegisterReq/Rsp`，应检查 `kDataTransformReq/Rsp` | `message_handle/atbus_message_handler.go` |
 
-### 7.2 潜在风险
-1. **⚠️ 协议不兼容** - 最大风险，必须仔细对照 C++ 实现
-2. **⚠️ 字节序问题** - 确保使用 Little-Endian (与 C++ 一致)
-3. **⚠️ Varint 编码差异** - 必须使用 libatbus 自定义 vint (`buffer.ReadVint/WriteVint`)
-4. **并发问题** - Go 的并发模型与 C++ 单线程回调不同，需要仔细处理
-5. **性能差异** - goroutine 调度可能影响低延迟场景
+### P1 (重要 - 功能完整性)
 
-### 7.3 跨语言互通风险缓解措施
-| 风险 | 缓解措施 |
-|------|----------|
-| 消息帧格式不一致 | 编写二进制对比测试，与 C++ 输出逐字节比较 |
-| Protobuf 序列化差异 | 使用相同 .proto 文件，验证序列化结果一致 |
-| 加密算法实现差异 | 使用标准库，编写向量测试与 C++ 对照 |
-| 握手流程差异 | 抓包分析 C++ 握手流程，严格对照实现 |
+| 编号 | 任务 | 说明 | 涉及文件 |
+|------|------|------|---------|
+| P1-1 | Shutdown 回调行为 | 确认 `Shutdown(reason)` 调用 `on_node_down` 回调，并在回调返回非零时延迟 reset | `impl/atbus_node.go` |
+| P1-2 | 连接超时行为 | 确认 `first_idle_timeout` 超时后触发 `on_invalid_connection` 回调并断开 | `impl/atbus_node.go` |
+| P1-3 | Fault Tolerant 行为 | 确认错误次数超过 `fault_tolerant` 阈值后自动断开连接/端点 | `impl/atbus_node.go`, `impl/atbus_endpoint.go` |
+| P1-4 | 上游掉线与重连 | 确认上游断开后状态变为 `LostUpstream`/`ConnectingUpstream`，自动重试连接 | `impl/atbus_node.go` |
+| P1-5 | Topology on_topology_update_upstream | 确认上游拓扑变更回调触发正确 | `impl/atbus_node.go` |
+| P1-6 | NodeGetPeerOptions.blacklist | 确认黑名单过滤在路由中正确生效 | `impl/atbus_node.go` |
+| P1-7 | send_data RequireResponse 标志 | 确认 `FORWARD_DATA_FLAG_REQUIRE_RSP` 在发送失败或接收方处理后自动响应 | `message_handle/` |
+| P1-8 | Custom Command 的 access token 校验 | 确认 custom command 消息也做 access token 校验（与 register 一致） | `message_handle/` |
+| P1-9 | Protocol Version 校验 | 确认注册时检查对端协议版本，低于 `protocol_minimal_version` 时拒绝 | `message_handle/` |
+| P1-10 | 连接冲突检测 | 确认 ID 冲突时的处理行为与 C++ 一致（拒绝注册 or 踢出旧连接） | `message_handle/`, `impl/atbus_node.go` |
+| P1-11 | XXTEA 加密实现 | 在 `atframe-utils-go/algorithm/crypto/` 实现 XXTEA（参考 C++ xxtea.cpp），然后集成到 libatbus-go connection_context 加密分支 | `atframe-utils-go/algorithm/crypto/xxtea.go`, `impl/atbus_connection_context.go` |
+| P1-12 | IsCompressionAlgorithmSupported | 添加公开函数查询压缩算法支持能力 | `impl/atbus_connection_context.go` |
 
-### 7.3 测试环境
-- 需要支持 TCP、Unix socket 测试
-- Windows 下可能需要跳过部分 Unix socket 测试
+### P2 (改进 - 功能增强)
+
+| 编号 | 任务 | 说明 | 涉及文件 |
+|------|------|------|---------|
+| P2-1 | ChaCha20 纯流密码 | 验证/实现纯 ChaCha20（非 AEAD）以保证与 C++ 互通 | `impl/atbus_connection_context.go` |
+| P2-2 | 支持 overwrite_listen_path | 确认 Unix socket / named pipe 监听时是否支持覆盖已存在文件 | `channel/io_stream/` |
+
+### P3 (低优先级 - 可选)
+
+| 编号 | 任务 | 说明 | 涉及文件 |
+|------|------|------|---------|
+| P3-1 | Replay Attack 防护 | 实现 nonce 追踪防重放攻击 | `impl/atbus_node.go` |
 
 ---
 
-## 八、时间估算
+## 五、单元测试补全计划
 
-| 阶段 | 预估时间 | 输出 |
-|------|----------|------|
-| Phase 1: IO Stream 通道 | 3-5 天 | channel/io_stream/*.go |
-| Phase 2: Connection 完善 | 2-3 天 | impl/atbus_connection.go 完善 |
-| Phase 3: Node 核心功能 | 3-4 天 | impl/atbus_node.go 完善 |
-| Phase 4: Endpoint 完善 | 1-2 天 | impl/atbus_endpoint.go 完善 |
-| Phase 5: 单元测试 | 4-5 天 | impl/*_test.go |
-| **Phase 6: 跨语言互通测试** | **2-3 天** | **integration/*_test.go** |
-| **总计** | **15-22 天** | 完整功能 + 测试 + 互通验证 |
+> 本章基于 C++ 测试用例 (118+ cases) 逐项映射 Go 测试，确保覆盖所有场景。
+> 排除 `mem://` 和 `shm://` 相关用例。
+> 不破坏测试目的和核心时序。
 
----
+### 5.1 已有 Go 测试覆盖情况
 
-## 九、验收标准
+| C++ 测试文件 | 测试数量 | Go 等价测试 | 覆盖状态 |
+|-------------|---------|------------|---------|
+| `libatbus_error_test.cpp` (6) | 6 | `error_code/libatbus_error_test.go` (2) | ⚠️ 部分覆盖 |
+| `buffer_test.cpp` (11) | 11 | `buffer/*_test.go` (~40) | ✅ 超额覆盖 |
+| `channel_io_stream_tcp_test.cpp` (8) | 8 | `channel/io_stream/*_test.go` (~20) | ✅ 覆盖 |
+| `channel_io_stream_unix_test.cpp` (5) | 5 | `channel/io_stream/*_test.go` | ✅ 覆盖 |
+| `channel_mem_test.cpp` (6) | 6 | N/A | ❌ 不需要 |
+| `channel_shm_test.cpp` (6) | 6 | N/A | ❌ 不需要 |
+| `atbus_topology_test.cpp` (9) | 9 | `impl/atbus_topology_test.go` (9) | ✅ 覆盖 |
+| `atbus_endpoint_test.cpp` (5) | 5 | 无对应文件 | ❌ 需新增 |
+| `atbus_connection_context_test.cpp` (37) | 37 | `impl/atbus_connection_context_test.go` (~26) | ⚠️ 部分覆盖 |
+| `atbus_message_handler_test.cpp` (16) | 16 | `message_handle/atbus_message_handler_test.go` (17) | ✅ 覆盖 |
+| `atbus_node_setup_test.cpp` (3) | 3 | 无对应文件 | ❌ 需新增 |
+| `atbus_node_reg_test.cpp` (22) | 22 | 无对应文件 | ❌ 需新增 |
+| `atbus_node_msg_test.cpp` (24) | 24 | 无对应文件 | ❌ 需新增 |
+| `atbus_node_relationship_test.cpp` (3) | 3 | 无对应文件 | ❌ 需新增 |
+| `atbus_connection_context_crosslang_generator.cpp` (10) | 10 | 无对应文件 | ❌ 需新增 |
+| `atbus_access_data_crosslang_generator.cpp` (8) | 8 | 无对应文件 | ⚠️ 部分覆盖 |
+| (C++ `xxtea_test.cpp`) | 2 | 无对应文件 | ❌ 需新增 (atframe-utils-go) |
 
-### 9.1 ⭐ 跨语言互通验收 (最高优先级)
+### 5.2 需新增的 Go 测试文件
 
-> **如果无法与 C++ 版本互通，则整个实现视为失败！**
+#### 5.2.0 `atframe-utils-go/algorithm/crypto/xxtea_test.go` (新文件)
 
-| 测试场景 | 描述 | 验收条件 |
-|----------|------|----------|
-| Go→C++ 注册 | Go 节点注册到 C++ 上游 | 注册成功，拓扑关系正确 |
-| C++→Go 注册 | C++ 节点注册到 Go 上游 | 注册成功，拓扑关系正确 |
-| Go→C++ 消息 | Go 发送数据到 C++ 节点 | C++ 正确接收并解析 |
-| C++→Go 消息 | C++ 发送数据到 Go 节点 | Go 正确接收并解析 |
-| 混合路由转发 | 消息经过 Go 和 C++ 节点转发 | 路由正确，数据完整 |
-| 加密通道互通 | Go/C++ 使用加密通道通信 | 握手成功，数据正确加解密 |
-| 自定义命令互通 | Go/C++ 互发自定义命令 | 命令正确解析和响应 |
-| Ping/Pong 互通 | Go/C++ 互相 ping | 延迟统计正确 |
+> XXTEA 算法独立测试，放在 atframe-utils-go 仓库中。
 
-#### 互通测试方法
-```bash
-# 1. 启动 C++ atproxy 作为上游
-./atproxy --bus-id=0x10000001 --listen=ipv4://127.0.0.1:9100
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestXXTEABasic` | `xxtea_test::basic` | 使用 6 组 C++ 测试向量，就地加密 → 验证密文 → 就地解密 → 验证回到明文 |
+| 2 | `TestXXTEAInputOutput` | `xxtea_test::input_output` | 使用独立 input/output buffer，验证加密 output 大小 ≥ input 大小且 4 字节对齐，解密还原 |
+| 3 | `TestXXTEAEdgeCases` | 无 | 测试空输入错误、奇数长度 pad 验证、<8 字节输入处理 |
 
-# 2. 启动 Go 节点连接到 C++ 上游
-./go-node --bus-id=0x10010001 --upstream=ipv4://127.0.0.1:9100
+#### 5.2.1 `impl/atbus_endpoint_test.go` (新文件)
 
-# 3. 启动 C++ 节点作为兄弟节点
-./cpp-node --bus-id=0x10010002 --upstream=ipv4://127.0.0.1:9100
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestEndpointConnectionBasic` | `atbus_endpoint::connection_basic` | 测试 nil node 创建 connection 返回空 |
+| 2 | `TestEndpointBasic` | `atbus_endpoint::endpoint_basic` | 测试 nil node 创建 endpoint 返回空 |
+| 3 | `TestEndpointIsChild` | `atbus_endpoint::is_child` | 测试拓扑关系查询: Self/ImmediateDownstream/Invalid；创建 node，手动添加 topology peer，验证 `GetTopologyRelation()` 返回正确关系和 next_hop |
+| 4 | `TestEndpointGetConnection` | `atbus_endpoint::get_connection` | 测试优先级选择: 创建 endpoint 添加不同类型 connection（本地 vs 远程），验证 `GetDataConnection()` 返回优先级最高的连接 |
+| 5 | `TestChannelAddress` | `atbus_channel::address` | 测试地址解析: 空字符串/duplex/simplex/local_host/local_process 判断（已在 `channel/utility/` 中覆盖，可跳过或移入） |
 
-# 4. 验证 Go 和 C++ 节点之间可以互相发送消息
+#### 5.2.2 `impl/atbus_node_setup_test.go` (新文件)
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestNodeSetupOverrideListenPath` | `atbus_node_setup::override_listen_path` | 仅限 Unix/macOS: 三个 node 监听相同 unix socket 路径，验证 overwrite_listen_path=true/false 行为 |
+| 2 | `TestNodeSetupCryptoAlgorithms` | `atbus_node_setup::crypto_algorithms` | 遍历所有 ATBUS_CRYPTO_ALGORITHM_TYPE，验证可用算法列表 |
+| 3 | `TestNodeSetupCompressionAlgorithms` | `atbus_node_setup::compression_algorithms` | 遍历所有 ATBUS_COMPRESSION_ALGORITHM_TYPE，验证可用算法列表 |
+
+#### 5.2.3 `impl/atbus_node_reg_test.go` (新文件 - 核心)
+
+> 所有测试使用 TCP (ipv4/ipv6) 通道。每个测试需创建真实 node、真实网络连接。
+> 使用辅助函数 `waitUntil(condition, timeout)` 等待异步条件。
+
+| 序号 | 测试名 | 对应 C++ | 关键时序和断言 |
+|------|--------|---------|--------------|
+| 1 | `TestNodeRegResetAndSendTcp` | `atbus_node_reg::reset_and_send_tcp` | 1) 创建 2 个对等节点，配置 access_token；2) 双方 Init/Listen/Start；3) 设置 add/remove endpoint 回调；4) node1 Connect → node2；5) 等待 `IsEndpointAvailable` 双向；6) 发送数据验证接收；7) `Shutdown()` node1；8) 等待 endpoint 变为 nil；9) 断言: add_count ≥ 2, remove_count ≥ 2 |
+| 2 | `TestNodeRegTimeout` | `atbus_node_reg::timeout` | 1) 2 节点，设置 `on_new_connection` & `on_invalid_connection` 回调；2) Connect；3) 等 new_conn_count ≥ 1；4) 跳过时间超过 `first_idle_timeout`，调 `Proc(futureTime)`；5) 等 invalid_conn_count ≥ 1；6) 断言: 超时状态 = EN_ATBUS_ERR_NODE_TIMEOUT |
+| 3 | `TestNodeRegMessageSizeLimit` | `atbus_node_reg::message_size_limit` | 1) 配置 `MessageSize = 4096`；2) 发送恰好 4096 字节的数据 → 成功；3) 发送 4097 字节 → EN_ATBUS_ERR_INVALID_SIZE |
+| 4 | `TestNodeRegFailedMismatchAccessToken` | `atbus_node_reg::reg_failed_with_mismatch_access_token` | 1) 节点 1 用 token "A"，节点 2 用 token "B"；2) Connect；3) 等待短时间；4) 断言: register_failed ≥ 2, status = ACCESS_DENY |
+| 5 | `TestNodeRegFailedMissingAccessToken` | `atbus_node_reg::reg_failed_with_missing_access_token` | 同上，但一方无 token |
+| 6 | `TestNodeRegFailedUnsupportedVersion` | `atbus_node_reg::reg_failed_with_unsupported` | 1) node1 的 ProtocolVersion < MinimalVersion；2) Connect；3) 断言: UNSUPPORTED_VERSION |
+| 7 | `TestNodeRegDestruct` | `atbus_node_reg::destruct` | 1) 2 节点连接；2) 将 node1 设为 nil（Go GC 或 Reset）；3) 等 node2 检测到端点丢失 |
+| 8 | `TestNodeRegPcSuccess` | `atbus_node_reg::reg_pc_success` | 1) 上下游节点，配置 UpstreamAddress；2) 设置 on_register/on_available 回调；3) 依序 Init/Listen/Start；4) 等双方 `IsEndpointAvailable`；5) 断言: register_count ≥ 2, add_endpoint ≥ 2, available ≥ 2；6) Disconnect → SUCCESS, 再次 Disconnect → NOT_FOUND |
+| 9 | `TestNodeRegPcSuccessCrossSubnet` | `atbus_node_reg::reg_pc_success_cross_subnet` | 同 test 8，但 bus_id 首字节不同，验证跨子网仍可连接 |
+| 10 | `TestNodeRegBrotherSuccess` | `atbus_node_reg::reg_bro_success` | 对等节点注册，验证双向 endpoint 可用 |
+| 11 | `TestNodeRegConflict` | `atbus_node_reg::conflict` | 1) 上游 + 2 下游，下游 ID 子网冲突；2) 一个注册成功，另一个失败 |
+| 12 | `TestNodeRegReconnectUpstreamFailed` | `atbus_node_reg::reconnect_upstream_failed` | 1) 上下游连接成功；2) Reset 上游；3) 下游变为 LostUpstream/ConnectingUpstream；4) 创建新上游；5) 下游重新连接到 Running |
+| 13 | `TestNodeRegSetHostname` | `atbus_node_reg::set_hostname` | 设置/获取/恢复 hostname |
+| 14 | `TestNodeRegOnCloseConnectionNormal` | `atbus_node_reg::on_close_connection_normal` | 1) 2 节点连接；2) 设 on_close_connection 回调；3) node1 Shutdown；4) 断言: close_count 增加 |
+| 15 | `TestNodeRegOnCloseConnectionByPeer` | `atbus_node_reg::on_close_connection_by_peer` | 同上，但 node1 直接 Reset（非优雅关闭），验证对端检测到断开 |
+| 16 | `TestNodeRegOnTopologyUpstreamSet` | `atbus_node_reg::on_topology_upstream_set` | 1) 设置 on_topology_update_upstream 回调；2) 上下游连接；3) 断言: 回调触发，新 upstream ID 正确 |
+| 17 | `TestNodeRegOnTopologyUpstreamClear` | `atbus_node_reg::on_topology_upstream_clear` | 1) 上下游连接成功后 Reset 上游；2) 断言: 回调触发或下游检测到 upstream 丢失 |
+| 18 | `TestNodeRegOnTopologyUpstreamChangeId` | `atbus_node_reg::on_topology_upstream_change_id` | 1) 上下游连接成功；2) Reset 旧上游；3) 创建新上游(不同 ID)；4) 下游重新连接；5) 断言: 回调触发，old_id ≠ new_id |
+
+> **注**: 跳过 `mem_and_send`(#15) 和 `shm_and_send`(#16)：Go 不支持 mem/shm 通道。
+
+#### 5.2.4 `impl/atbus_node_msg_test.go` (新文件 - 核心)
+
+> 消息收发、路由转发、加密测试。
+
+| 序号 | 测试名 | 对应 C++ | 关键时序和断言 |
+|------|--------|---------|--------------|
+| 1 | `TestNodeMsgPingPong` | `atbus_node_msg::ping_pong` | 1) 3 节点: node1, node2, upstream；PingInterval=1s；2) 连接等待；3) 等待 ≥4 秒的 pong 计数；4) 断言: pong_count ≈ elapsed_seconds × expected_rate (±tolerance)；5) 断言: 双方 endpoint 的 LastPong 时间 > 0 |
+| 2 | `TestNodeMsgCustomCmd` | `atbus_node_msg::custom_cmd` | 1) 2 对等节点连接；2) 设置 custom_command_request/response 回调；3) 分配 sequence；4) 发送 3 段命令 ["hello", "world", "!"]；5) 等待 response；6) 断言: 接收数据 = 发送数据，sequence 正确 |
+| 3 | `TestNodeMsgCustomCmdByTempNode` | `atbus_node_msg::custom_cmd_by_temp_node` | 1) node1(固定ID) + node2(临时 ID=0)；2) node2 不 Listen，直接连接 node1；3) node2 发 custom command 给 node1；4) 断言: 正常收到响应 |
+| 4 | `TestNodeMsgSendCmdToSelf` | `atbus_node_msg::send_cmd_to_self` | 1) 单节点；2) 未初始化时发送 → NOT_INITED；3) 初始化后发送自定义命令给自己；4) 断言: request + response 回调各触发一次 (count+=2) |
+| 5 | `TestNodeMsgResetAndSend` | `atbus_node_msg::reset_and_send` | 1) 单节点发送数据给自己；2) 断言: 接收数据正确 |
+| 6 | `TestNodeMsgSendLoopbackError` | `atbus_node_msg::send_loopback_error` | 1) 2 对等节点；2) 构造指向不存在节点的消息，通过已有连接发送；3) 断言: 对端返回 INVALID_ID 错误 |
+| 7 | `TestNodeMsgSendToSelfAndNeedRsp` | `atbus_node_msg::send_msg_to_self_and_need_rsp` | 1) 单节点，REQUIRE_RSP 标志；2) request 回调中再次发送数据；3) 断言: 总计 3 次回调 (初始 req + echo req + echo rsp) |
+| 8 | `TestNodeMsgUpstreamAndDownstream` | `atbus_node_msg::upstream_and_downstream` | 1) 上下游 2 节点；2) 双向发送数据；3) 断言: 双向均成功接收，数据匹配 |
+| 9 | `TestNodeMsgTransferAndConnect` | `atbus_node_msg::transfer_and_connect` | 1) 1 上游 + 2 下游（兄弟），手动注册拓扑；2) 下游1 → 下游2 发送数据 (经上游转发)；3) 断言: 下游2 收到数据，router 路径包含上游 |
+| 10 | `TestNodeMsgTransferOnly` | `atbus_node_msg::transfer_only` | 1) 4 节点 (2 上游 + 2 下游)，手动注册拓扑；2) 跨上游发送 (down1→up1→up2→down2)；3) 断言: 多跳转发成功 |
+| 11 | `TestNodeMsgTopologyMultiLevelRoute` | `atbus_node_msg::topology_registry_multi_level_route` | 1) 3 节点链 (上游→中间→下游)；2) 注册拓扑前: `GetTopologyRelation(下游)` = Invalid；3) 注册拓扑后: `GetTopologyRelation(下游)` = TransitiveDownstream, next_hop = 中间节点；4) 发送数据 + RequireResponse；5) 断开中间→下游连接后重试 → 收到错误响应 |
+| 12 | `TestNodeMsgTopologyMultiLevelRouteReverse` | `atbus_node_msg::topology_registry_multi_level_route_reverse` | 同 test 11 但反向（下游→上游） |
+| 13 | `TestNodeMsgSendFailed` | `atbus_node_msg::send_failed` | 1) 单上游节点；2) 发送到不存在的 ID → INVALID_ID |
+| 14 | `TestNodeMsgTransferFailed` | `atbus_node_msg::transfer_failed` | 1) 上下游 + fake peer 拓扑；2) 下游发送到 fake peer via 上游 → 上游转发失败；3) 断言: response 回调收到错误 |
+| 15 | `TestNodeMsgTransferFailedCrossUpstreams` | `atbus_node_msg::transfer_failed_cross_upstreams` | 1) 复杂拓扑（2 上游 + 下游）；2) 发送到不存在的目标 → 通过上游链转发后失败；3) 断言: 错误响应，但本地连接不断 |
+| 16 | `TestNodeMsgHandlerGetBodyName` | `atbus_node_msg::msg_handler_get_body_name` | 1) GetBodyName(0) = "Unknown"；2) GetBodyName(大数) = "Unknown"；3) GetBodyName(DataTransformReq) = 有效名 |
+| 17 | `TestNodeMsgCryptoKeyExchangeAlgorithms` | `atbus_node_msg::crypto_config_key_exchange_algorithms` | 遍历所有 KeyExchangeType (X25519, P256, P384, P521)，每个配置 AES-256-GCM，2 对等节点加密通信 |
+| 18 | `TestNodeMsgCryptoCipherAlgorithms` | `atbus_node_msg::crypto_config_cipher_algorithms` | 遍历所有 CryptoAlgorithm (AES-CBC/GCM, ChaCha20-Poly1305 等)，每个配置 X25519 交换，验证通信 |
+| 19 | `TestNodeMsgCryptoComprehensiveMatrix` | `atbus_node_msg::crypto_config_comprehensive_matrix` | KeyExchange × CipherAlgorithm 全组合测试 |
+| 20 | `TestNodeMsgCryptoMultipleAlgorithms` | `atbus_node_msg::crypto_config_multiple_algorithms` | 配置允许多个算法，验证协商成功 |
+| 21 | `TestNodeMsgCryptoUpstreamDownstream` | `atbus_node_msg::crypto_config_upstream_downstream` | 上下游节点加密通信测试 |
+| 22 | `TestNodeMsgCryptoDisabled` | `atbus_node_msg::crypto_config_disabled` | CryptoKeyExchangeType = NONE，验证明文通信正常 |
+| 23 | `TestNodeMsgCryptoListAvailableAlgorithms` | `atbus_node_msg::crypto_list_available_algorithms` | 列出所有可用算法，确认不为空 |
+
+#### 5.2.5 `impl/atbus_node_relationship_test.go` (新文件)
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestNodeRelaCopyConf` | `atbus_node_rela::copy_conf` | 创建 NodeConfigure 并复制，验证字段一致 |
+| 2 | `TestNodeRelaChildEndpointOpr` | `atbus_node_rela::child_endpoint_opr` | 1) 创建 node；2) 添加 3 个 endpoint（其中一个重复）；3) 删除不存在的 → NOT_FOUND；4) 删除已有的 → SUCCESS |
+
+#### 5.2.6 `impl/atbus_connection_context_crosslang_test.go` (新文件)
+
+> 跨语言兼容性测试：加载 C++ 生成的测试向量，验证 Go 实现能正确解析。
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestCrossLangNoEncryptionUnpack` | `crosslang_generator::generate_no_encryption_test_files` | 加载 C++ 生成的无加密消息二进制文件，用 Go unpack 验证 |
+| 2 | `TestCrossLangCompressedUnpack` | `crosslang_generator::generate_compressed_test_files` | 加载 C++ 生成的压缩消息，验证 Go 能正确解压 |
+| 3 | `TestCrossLangEncryptedUnpack` | `crosslang_generator::generate_encrypted_test_files` | 加载 C++ 生成的加密消息，用相同密钥解密验证 |
+| 4 | `TestCrossLangCompressedEncryptedUnpack` | `crosslang_generator::generate_compressed_encrypted_test_files` | 加载 C++ 生成的压缩+加密消息验证 |
+
+#### 5.2.7 `impl/atbus_access_data_crosslang_test.go` (新文件)
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestCrossLangAccessDataPlaintext` | `access_data_crosslang::generate_plaintext_test_files` | 加载 C++ 生成的 plaintext 测试向量，验证 Go `MakeAccessDataPlaintext*` 输出一致 |
+| 2 | `TestCrossLangAccessDataSignature` | `access_data_crosslang::generate_signature_test_files` | 加载 C++ 生成的签名测试向量，验证 Go `CalculateAccessDataSignature` 输出一致 |
+| 3 | `TestCrossLangAccessDataFull` | `access_data_crosslang::generate_full_access_data_test_files` | 加载 C++ 生成的完整 access_data，验证 Go `GenerateAccessData` 输出一致 |
+
+#### 5.2.8 补充已有测试文件
+
+##### `error_code/libatbus_error_test.go` 补充
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestLibatbusStrerrorKnownSamples` | `libatbus_error::strerror_known_samples` | 验证多个已知错误码的字符串映射 |
+| 2 | `TestLibatbusStrerrorUnknownThreadLocalCache` | `libatbus_error::strerror_unknown_thread_local_cache` | 未知错误码的缓存行为 |
+| 3 | `TestLibatbusWstrerror` | `libatbus_error::wstrerror_known_and_unknown` | 宽字符版本（Go 中可用 UTF-8 等价） |
+
+##### `impl/atbus_connection_context_test.go` 补充
+
+| 序号 | 测试名 | 对应 C++ | 说明 |
+|------|--------|---------|------|
+| 1 | `TestPaddingTemporaryBufferBlock` | `padding_*` (9 tests) | 测试 0/8/16/64/4096/1MB 等大小的对齐计算 |
+| 2 | `TestHandshakeCompleteFlow` | `handshake_complete_flow` | 完整 client-server 握手: client 生成 key → server 读取 → server 生成 key → client 读取 → 验证双方共享密钥一致 |
+| 3 | `TestHandshakeSequenceMismatch` | `handshake_sequence_mismatch` | 使用错误的 sequence 调用 confirm → 失败 |
+| 4 | `TestHandshakeNoCommonAlgorithm` | `handshake_no_common_algorithm` | 双方无共同加密算法时的处理 |
+| 5 | `TestPackUnpackWithEncryption` | `pack_unpack_encrypted_message` | AES-256-GCM 加密消息的打包/解包往返 |
+| 6 | `TestPackUnpackWithCompression` | `pack_unpack_compressed_message` | 各压缩算法的打包/解包往返 |
+| 7 | `TestPackUnpackSizeLimit` | `pack_unpack_size_limit` | 超过 max_body_size 的消息 → 错误 |
+| 8 | `TestPackUnpackInvalidData` | `pack_unpack_invalid_data` | 损坏的数据 → 错误 |
+| 9 | `TestBidirectionalEncryptedCommunication` | `bidirectional_encrypted_communication` | 双方使用各自密钥加解密通信 |
+| 10 | `TestAllKeyExchangeWithAES256GCM` | `all_key_exchange_algorithms_with_aes256_gcm` | X25519/P256/P384/P521 × AES-256-GCM |
+| 11 | `TestAllCryptoWithSECP256R1` | `all_crypto_algorithms_with_secp256r1` | P-256 × 所有密码算法 |
+| 12 | `TestAllCryptoWithX25519` | `all_crypto_algorithms_with_x25519` | X25519 × 所有密码算法 |
+| 13 | `TestComprehensiveCryptoMatrix` | `comprehensive_crypto_matrix` | 所有 KeyExchange × 所有 Cipher 全组合 |
+| 14 | `TestAEADCiphersVerification` | `aead_ciphers_verification` | 验证 AEAD 密码的 tag_size 和行为 |
+| 15 | `TestNonAEADCiphersVerification` | `non_aead_ciphers_verification` | 验证非 AEAD 密码的 PKCS#7 padding |
+| 16 | `TestHigherSecurityKeyExchange` | `higher_security_key_exchange` | P-384, P-521 高安全级别密钥交换 |
+| 17 | `TestKeyRenegotiationFlow` | `key_renegotiation_flow` | 完整密钥重协商: 初始握手 → 通信 → 重新生成密钥 → stage → confirm → 新密钥通信 |
+
+### 5.3 测试辅助工具
+
+在 Go 测试中需创建以下辅助:
+
+```go
+// impl/atbus_test_utils_test.go
+
+// waitUntil 循环执行 node.Proc() 直到条件满足或超时
+func waitUntil(t *testing.T, condition func() bool, timeout time.Duration,
+    tickInterval time.Duration, nodes ...types.Node) bool
+
+// createTestNode 创建、初始化并启动测试节点
+func createTestNode(t *testing.T, busId types.BusIdType,
+    listenAddr string, opts ...TestNodeOption) types.Node
+
+// TestNodeOption 用于自定义节点配置
+type TestNodeOption func(*types.NodeConfigure)
+
+// withAccessToken 配置 access token
+func withAccessToken(token string) TestNodeOption
+
+// withCrypto 配置加密算法
+func withCrypto(keyExchange protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE,
+    algorithms ...protocol.ATBUS_CRYPTO_ALGORITHM_TYPE) TestNodeOption
+
+// withCompression 配置压缩算法
+func withCompression(algorithms ...protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE) TestNodeOption
+
+// withUpstream 配置上游地址
+func withUpstream(address string) TestNodeOption
+
+// withPingInterval 配置 ping 间隔
+func withPingInterval(interval time.Duration) TestNodeOption
+
+// withMessageSize 配置最大消息大小
+func withMessageSize(size uint64) TestNodeOption
+
+// RecvMsgHistory 记录接收到的消息历史
+type RecvMsgHistory struct {
+    mu        sync.Mutex
+    Count     int
+    Data      []byte
+    Status    error_code.ErrorType
+    PingCount int
+    PongCount int
+    // ... 更多跟踪字段
+}
 ```
 
-### 9.2 功能完整性
-   - [ ] 所有 Node API 实现且行为与 C++ 一致
-   - [ ] 所有 Connection 方法实现
-   - [ ] 所有 Endpoint 方法实现
-   - [ ] IO Stream 通道支持 TCP/Unix socket
+### 5.4 测试执行规范
 
-### 9.3 协议兼容性
-   - [ ] 消息帧格式与 C++ 完全一致 (hash + varint + payload)
-   - [ ] Protobuf 消息与 C++ 二进制兼容
-   - [ ] 加密握手流程与 C++ 一致
-   - [ ] Access Token 签名算法与 C++ 一致
-   - [ ] **能够与 C++ 版本完全互通**
+1. **网络端口**: 每个测试函数使用唯一端口范围，避免并发冲突
+2. **超时**: 所有 `waitUntil` 使用合理超时（建议 8-15 秒），ticker 间隔 50-100ms
+3. **清理**: 每个测试结束时 `defer node.Reset()` 确保资源释放
+4. **并行**: `node_reg` 和 `node_msg` 测试不建议并行执行（端口冲突）
+5. **跳过条件**: Unix socket 测试在 Windows 上 `t.Skip()`
+6. **时序要求**:
+   - 连接建立后再发数据
+   - Proc() 调用需在主 goroutine 或受控 goroutine 中
+   - ping/pong 测试需精确控制时间推进
+7. **测试命名**: 遵循 Go 惯例 `TestXxx`，用 `t.Run()` 做子测试
 
-### 9.4 测试覆盖
-   - [ ] 覆盖所有 C++ 测试用例
-   - [ ] **新增跨语言互通测试**
-   - [ ] 测试覆盖率 > 80%
+### 5.5 测试优先级
 
-### 9.5 代码质量
-   - [ ] 通过 golangci-lint 检查
-   - [ ] 有完整的 godoc 注释
-
----
-
-## 附录 A: C++ 测试用例完整列表
-
-### atbus_node_setup_test.cpp
-1. `override_listen_path` (仅 Unix)
-2. `crypto_algorithms`
-3. `compression_algorithms`
-
-### atbus_node_reg_test.cpp
-1. `reset_and_send_tcp`
-2. `reg_and_send_unix` (仅 Unix)
-3. `reg_with_different_access_token`
-4. `reconnect_same_addr`
-5. `reg_timeout_connection`
-6. `reg_cancel_before_connected`
-7. `reconnect_fail_when_reset`
-8. `auto_dealloc`
-9. `hash_code`
-10. `message_handler_callback`
-11. `reg_with_crypto` (多种加密算法)
-12. `reg_with_compression` (多种压缩算法)
-13. ... (更多)
-
-### atbus_node_msg_test.cpp
-1. `send_to_self_basic`
-2. `send_to_self_loop`
-3. `send_to_sibling_basic`
-4. `send_data_forward`
-5. `send_with_router`
-6. `custom_command_basic`
-7. `custom_command_with_rsp`
-8. `ping_pong_basic`
-9. `ping_pong_timeout`
-10. ... (更多)
-
-### atbus_node_relationship_test.cpp
-1. `copy_conf`
-2. `child_endpoint_opr`
-
-### atbus_endpoint_test.cpp
-1. `connection_basic`
-2. `endpoint_basic`
-3. `is_child`
-4. `get_connection`
-5. `address`
+| 优先级 | 测试文件 | 原因 |
+|--------|---------|------|
+| P0 | `atbus_node_reg_test.go` | 连接/注册是核心功能 |
+| P0 | `atbus_node_msg_test.go` | 消息收发是核心功能 |
+| P0 | `atbus_connection_context_test.go` 补充 | 加密正确性关键 |
+| P1 | `atbus_node_relationship_test.go` | 拓扑操作验证 |
+| P1 | `atbus_endpoint_test.go` | 端点管理验证 |
+| P1 | `atbus_connection_context_crosslang_test.go` | 跨语言互通验证 |
+| P1 | `atbus_access_data_crosslang_test.go` | 跨语言签名验证 |
+| P2 | `atbus_node_setup_test.go` | 配置和算法验证 |
+| P2 | `error_code` 补充 | 错误码完整性 |
 
 ---
 
-## 附录 B: 文件修改清单
+## 六、实施路线
 
-### 新建文件
-- `channel/io_stream/channel_io_stream.go`
-- `channel/io_stream/io_stream_conf.go`
-- `channel/io_stream/io_stream_connection.go`
-- `channel/io_stream/frame_codec.go` - **帧编解码 (跨语言关键)**
-- `impl/atbus_node_test.go`
-- `impl/atbus_node_reg_test.go`
-- `impl/atbus_node_msg_test.go`
-- `impl/atbus_node_relationship_test.go`
-- `impl/atbus_endpoint_test.go`
-- `impl/test_utils.go`
-- `integration/crosslang_reg_test.go` - **跨语言注册测试 (使用 atapp echosvr)**
-- `integration/crosslang_msg_test.go` - **跨语言消息测试 (使用 atapp echosvr)**
-- `integration/crosslang_crypto_test.go` - **跨语言加密测试 (使用 atapp echosvr)**
-- `integration/crosslang_test_utils.go` - **跨语言测试工具 (启动/管理 echosvr)**
+### 阶段 1: Bug 修复与验证 (P0)
 
-### 修改文件
-- `impl/atbus_node.go` - 完善核心方法
-- `impl/atbus_connection.go` - 实现 IO 方法
-- `impl/atbus_endpoint.go` - 完善 CreateEndpoint
-- `types/atbus_node.go` - 可能需要补充接口
+1. 修复 `getConnectionBinding()` 无限递归 Bug (P0-9)
+2. 修复 `SendTransferResponse()` body type 检查 Bug (P0-10)
+3. 逐项对比 Go/C++ 默认配置值，修正差异
+4. 验证 HKDF、access token 格式、TTL 行为
+5. 验证控制消息绕过加密/压缩
+6. 验证消息大小限制
+7. 验证 key renegotiation 完整时序
+
+### 阶段 2: 核心测试 (P0)
+
+8. 创建测试辅助工具 (`atbus_test_utils_test.go`)
+9. 实现 `atbus_node_reg_test.go` 全部用例
+10. 实现 `atbus_node_msg_test.go` 全部用例
+11. 补充 `atbus_connection_context_test.go` 缺失用例
+
+### 阶段 3: XXTEA 实现 (P1)
+
+12. 在 `atframe-utils-go/algorithm/crypto/` 实现 XXTEA 算法
+13. 实现 XXTEA 单元测试 (使用 C++ 测试向量)
+14. 集成 XXTEA 到 libatbus-go connection_context 加密分支
+15. 添加 `IsCompressionAlgorithmSupported()` 公开函数
+
+### 阶段 4: 完善测试 (P1)
+
+16. 实现 `atbus_endpoint_test.go`
+17. 实现 `atbus_node_relationship_test.go`
+18. 实现跨语言兼容性测试
+19. 补充 error_code 测试
+
+### 阶段 5: 功能修复 (P1-P2)
+
+20. 修复在测试中发现的行为差异
+21. ChaCha20 纯流密码兼容性
+22. overwrite_listen_path 支持
+
+### 阶段 6: 可选增强 (P3)
+
+23. Replay attack 防护
 
 ---
 
-*文档版本: v1.1*  
-*创建日期: 2026-02-04*  
-*更新日期: 2026-02-04*  
-*作者: GitHub Copilot*  
-*关键约束: **必须支持与 C++ 版本的跨语言互通***
+## 七、C++ 与 Go 接口对照表
+
+### Node 接口
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `create()` | `impl.CreateNode()` | ✅ |
+| `init(id, conf)` | `Init(id, conf)` | ✅ |
+| `start()` / `start(conf)` | `Start()` / `StartWithConfigure(conf)` | ✅ |
+| `reset()` | `Reset()` | ✅ |
+| `proc(now)` | `Proc(now)` | ✅ |
+| `poll()` | `Poll()` | ✅ (可能为 no-op) |
+| `listen(addr)` | `Listen(addr)` | ✅ |
+| `connect(addr)` | `Connect(addr)` | ✅ |
+| `connect(addr, ep)` | `ConnectWithEndpoint(addr, ep)` | ✅ |
+| `disconnect(id)` | `Disconnect(id)` | ✅ |
+| `send_data(tid, type, data)` | `SendData(tid, t, data)` | ✅ |
+| `send_data(tid, type, data, opts)` | `SendDataWithOptions(tid, t, data, opts)` | ✅ |
+| `send_custom_command(tid, args)` | `SendCustomCommand(tid, args)` | ✅ |
+| `send_custom_command(tid, args, opts)` | `SendCustomCommandWithOptions(tid, args, opts)` | ✅ |
+| `get_peer_channel(...)` | `GetPeerChannel(...)` | ✅ |
+| `set_topology_upstream(tid)` | `SetTopologyUpstream(tid)` | ✅ |
+| `get_endpoint(tid)` | `GetEndpoint(tid)` | ✅ |
+| `add_endpoint(ep)` | `AddEndpoint(ep)` | ✅ |
+| `remove_endpoint(tid)` | `RemoveEndpoint(ep)` | ✅ by design，Go 用 Endpoint 对象 |
+| `is_endpoint_available(tid)` | `IsEndpointAvailable(tid)` | ✅ |
+| `check_access_hash(...)` | `CheckAccessHash(...)` | ✅ |
+| `reload_crypto(...)` | `ReloadCrypto(...)` | ✅ |
+| `reload_compression(...)` | `ReloadCompression(...)` | ✅ |
+| `get_crypto_key_exchange_type()` | `GetCryptoKeyExchangeType()` | ✅ |
+| `get_hash_code()` | `GetHashCode()` | ✅ |
+| `get_iostream_channel()` | `GetIoStreamChannel()` | ✅ |
+| `get_self_endpoint()` | `GetSelfEndpoint()` | ✅ |
+| `get_upstream_endpoint()` | `GetUpstreamEndpoint()` | ✅ |
+| `get_immediate_endpoint_set()` | `GetImmediateEndpointSet()` | ✅ |
+| `default_conf(conf)` | `SetDefaultNodeConfigure(conf)` | ✅ |
+| N/A (C++ 用 uv_loop) | `GetContext()` | ✅ Go 用 context |
+| N/A | `Shutdown(reason)` | ✅ Go 新增 |
+| N/A | `FatalShutdown(...)` | ✅ Go 新增 |
+
+### Endpoint 接口
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `create(owner, id, pid, hostname)` | `CreateEndpoint(id, hostname, pid)` via Node | ✅ |
+| `reset()` | `Reset()` | ✅ |
+| `get_id()` | `GetId()` | ✅ |
+| `get_pid()` | `GetPid()` | ✅ |
+| `get_hostname()` | `GetHostname()` | ✅ |
+| `get_hash_code()` | `GetHashCode()` | ✅ |
+| `update_hash_code(code)` | `UpdateHashCode(code)` | ✅ |
+| `add_connection(conn, force)` | `AddConnection(conn, force)` | ✅ |
+| `remove_connection(conn)` | `RemoveConnection(conn)` | ✅ |
+| `is_available()` | `IsAvailable()` | ✅ |
+| `get_flag(f)` / `set_flag(f,v)` | `GetFlag(f)` / `SetFlag(f,v)` | ✅ |
+| `get_listen()` | `GetListenAddress()` | ✅ |
+| `add_listen(addr)` | `AddListenAddress(addr)` | ✅ |
+| `clear_listen()` | `ClearListenAddress()` | ✅ |
+| `update_supported_schemas(set)` | `UpdateSupportSchemes(list)` | ✅ |
+| `is_schema_supported(s)` | `IsSchemeSupported(s)` | ✅ |
+| `add_ping_timer()` | `AddPingTimer()` | ✅ |
+| `clear_ping_timer()` | `ClearPingTimer()` | ✅ |
+| `get_ctrl_connection(ep)` | `GetCtrlConnection(ep)` | ✅ |
+| `get_data_connection(ep)` | `GetDataConnection(ep, fallback)` | ✅ |
+| `get_data_connection_count(fallback)` | `GetDataConnectionCount(fallback)` | ✅ |
+| 所有统计方法 | 全部对应 | ✅ |
+
+### Connection 接口
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `create(owner, addr)` | 通过 Node 内部创建 | ✅ |
+| `reset()` | `Reset()` | ✅ |
+| `proc(node, now)` | `Proc()` | ✅ by design，Go 无 mem/shm 通道无需时间参数 |
+| `listen()` | `Listen()` | ✅ |
+| `connect()` | `Connect()` | ✅ |
+| `disconnect()` | `Disconnect()` | ✅ |
+| `push(buffer)` | `Push(buffer)` | ✅ |
+| `get_address()` | `GetAddress()` | ✅ |
+| `is_connected()` | `IsConnected()` | ✅ |
+| `is_running()` | `IsRunning()` | ✅ |
+| `get_binding()` | `GetBinding()` | ✅ |
+| `get_status()` | `GetStatus()` | ✅ |
+| `check_flag(f)` | `CheckFlag(f)` | ✅ |
+| `set_temporary()` | `SetTemporary()` | ✅ |
+| `get_statistic()` | `GetStatistic()` | ✅ |
+| `get_connection_context()` | `GetConnectionContext()` | ✅ |
+| `unpack(conn, msg, data)` | via `ConnectionContext.UnpackMessage()` | ✅ |
+
+### ConnectionContext 接口
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `create(algo, dh_ctx)` | 内部创建 | ✅ |
+| `pack_message(...)` | `PackMessage(...)` | ✅ |
+| `unpack_message(...)` | `UnpackMessage(...)` | ✅ |
+| `handshake_generate_self_key(seq)` | `HandshakeGenerateSelfKey(seq)` | ✅ |
+| `handshake_read_peer_key(...)` | `HandshakeReadPeerKey(...)` | ✅ |
+| `confirm_handshake(seq)` | `ConfirmHandshake(seq)` | ✅ |
+| `handshake_write_self_public_key(...)` | `HandshakeWriteSelfPublicKey(...)` | ✅ |
+| `get_handshake_start_time()` | `GetHandshakeStartTime()` | ✅ |
+| `get_crypto_key_exchange_algorithm()` | `GetCryptoKeyExchangeAlgorithm()` | ✅ |
+| `get_crypto_select_kdf_type()` | `GetCryptoSelectKdfType()` | ✅ |
+| `get_crypto_select_algorithm()` | `GetCryptoSelectAlgorithm()` | ✅ |
+| `get_compression_select_algorithm()` | `GetCompressSelectAlgorithm()` | ✅ |
+| `update_compression_algorithm(algos)` | `UpdateCompressionAlgorithm(algos)` | ✅ |
+| `setup_crypto_with_key(...)` | `SetupCryptoWithKey(...)` | ✅ |
+| `is_compression_algorithm_supported(algo)` | 无独立方法 | ⚠️ 需添加 (P1-12) |
+
+### TopologyRegistry 接口
+
+| C++ 方法 | Go 方法 | 状态 |
+|----------|---------|------|
+| `create()` | `CreateTopologyRegistry()` | ✅ |
+| `update_peer(targetId, upstreamId, data)` | `UpdatePeer(targetId, upstreamId, data)` | ✅ 签名一致 |
+| `get_peer(id)` | `GetPeer(id)` | ✅ |
+| `foreach_peer(fn)` | `ForeachPeer(fn)` | ✅ |
+| `remove_peer(id)` | `RemovePeer(id)` | ✅ |
+| `get_relation(from, to, &nextHop)` | `GetRelation(from, to) (relation, nextHop)` | ✅ Go 多返回值 |
+| `static check_policy(rule, fromData, toData)` | `CheckPolicy(rule, fromData, toData)` | ✅ C++ static / Go instance |
+
+---
+
+## 八、风险与注意事项
+
+1. **端口冲突**: Go 测试需使用不同端口范围，避免与 C++ 测试冲突
+2. **平台差异**: Unix socket 在 Windows 上不可用，需 `t.Skip()` 或用 TCP 替代
+3. **时间精度**: Go 的 `time.Time` 精度为纳秒，与 C++ `std::chrono::microseconds` 对齐
+4. **GC 影响**: Go GC 可能影响连接超时和 ping/pong 测试的时序
+5. **goroutine 泄漏**: 每个测试结束需确保所有 goroutine 正确关闭
+6. **竞态检测**: 建议所有测试在 `-race` 标志下运行
+7. **跨语言测试数据**: 需要 C++ 侧先生成测试向量文件，Go 侧加载验证
