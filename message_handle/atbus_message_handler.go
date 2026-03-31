@@ -296,7 +296,7 @@ func DispatchMessage(n types.Node, conn types.Connection, m *Message, status int
 		panic("Initialize handle set failed!")
 	}
 
-	if lu.IsNil(n) || lu.IsNil(conn) {
+	if lu.IsNil(n) {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
@@ -640,14 +640,14 @@ func onRecvDataTransferReq(n types.Node, conn types.Connection, m *Message, stat
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 
 		if !connIsNil {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
 	if head.GetVersion() < n.GetProtocolMinimalVersion() {
 		if !connIsNil {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 
 		return SendTransferResponse(n, m, error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION)
@@ -749,7 +749,7 @@ func onRecvDataTransferRsp(n types.Node, conn types.Connection, m *Message, stat
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 
 		if !connIsNil {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -805,7 +805,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 	if head == nil || cmdData == nil {
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -819,7 +819,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 		)
 
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return SendCustomCommandResponse(n, conn, rspData, head.GetType(), error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION,
 			head.GetSequence(), types.BusIdType(head.GetSourceBusId()),
@@ -888,7 +888,7 @@ func onRecvCustomCommandRsp(n types.Node, conn types.Connection, m *Message, sta
 	if head == nil || cmdData == nil {
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -1195,14 +1195,14 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 	if connIsNil || head == nil || regData == nil {
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
 		if !connIsNil {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
 	// check version
 	if head.GetVersion() < n.GetProtocolMinimalVersion() {
-		conn.AddStatFault()
+		conn.AddStatisticFault()
 		ret := SendRegister(types.MessageBodyTypeNodeRegisterRsp, n, conn, error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION,
 			head.GetSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
@@ -1301,7 +1301,7 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 	if connIsNil || head == nil || regData == nil {
 		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
 		if !connIsNil {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -1396,7 +1396,7 @@ func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int,
 			"no head or no node_ping_req",
 		)
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -1470,7 +1470,7 @@ func onRecvNodePong(n types.Node, conn types.Connection, m *Message, status int,
 			fmt.Sprintf("node recv node_ping from %v but without node_pong_rsp", m.GetHead().GetSourceBusId()),
 		)
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
@@ -1518,7 +1518,7 @@ func onRecvHandshakeConfirm(n types.Node, conn types.Connection, m *Message, sta
 			fmt.Sprintf("node recv handshake_confirm from %v but without handshake_confirm data", m.GetHead().GetSourceBusId()),
 		)
 		if !lu.IsNil(conn) {
-			conn.AddStatFault()
+			conn.AddStatisticFault()
 		}
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}

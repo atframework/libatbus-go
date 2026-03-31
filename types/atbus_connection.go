@@ -67,9 +67,9 @@ type Connection interface {
 
 	Push(buffer []byte) ErrorType
 
-	AddStatFault() uint64
+	AddStatisticFault() uint64
 
-	ClearStatFault()
+	ClearStatisticFault()
 
 	GetAddress() ChannelAddress
 

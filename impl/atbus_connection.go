@@ -250,7 +250,7 @@ func (c *Connection) SetIoStreamConnection(conn *io_stream.IoStreamConnection) {
 	c.ioStreamConnection = conn
 }
 
-func (c *Connection) AddStatFault() uint64 {
+func (c *Connection) AddStatisticFault() uint64 {
 	if c == nil {
 		return 0
 	}
@@ -259,7 +259,7 @@ func (c *Connection) AddStatFault() uint64 {
 	return c.statistic.FaultCount
 }
 
-func (c *Connection) ClearStatFault() {
+func (c *Connection) ClearStatisticFault() {
 	if c == nil {
 		return
 	}

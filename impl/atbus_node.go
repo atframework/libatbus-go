@@ -55,10 +55,11 @@ type endpointCollection struct {
 }
 
 type Node struct {
-	eventTimer nodeEventTimer
-	flags      uint16
-	configure  types.NodeConfigure
-	hashCode   string
+	eventTimer    nodeEventTimer
+	eventCancelFn context.CancelFunc
+	flags         uint16
+	configure     types.NodeConfigure
+	hashCode      string
 
 	ioStreamConfigure *types.IoStreamConfigure
 	ioStreamChannel   types.IoStreamChannel
@@ -79,6 +80,9 @@ type Node struct {
 	messageSequenceAllocator        atomic.Uint64
 	logger                          *utils_log.Logger
 	loggerEnableDebugMessageVerbose bool
+
+	selfDataMessages    list.List
+	selfCommandMessages list.List
 
 	stat nodeStatistic
 }
@@ -203,7 +207,7 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 
 	// Create IoStreamChannel
 	if n.configure.EventLoopContext == nil {
-		n.configure.EventLoopContext = context.Background()
+		n.configure.EventLoopContext, n.eventCancelFn = context.WithCancel(context.Background())
 	}
 	ioStreamConf := n.GetIoStreamConfigure()
 	n.ioStreamChannel = io_stream.NewIoStreamChannel(n.configure.EventLoopContext, ioStreamConf)
@@ -360,6 +364,15 @@ func (n *Node) Reset() error_code.ErrorType {
 	if n.ioStreamChannel != nil {
 		n.ioStreamChannel.Close()
 		n.ioStreamChannel = nil
+	}
+
+	// Clear self-message queues
+	n.selfDataMessages.Init()
+	n.selfCommandMessages.Init()
+
+	if n.eventCancelFn != nil {
+		n.eventCancelFn()
+		n.eventCancelFn = nil
 	}
 
 	// Reset state
@@ -555,10 +568,86 @@ func (n *Node) executeGC() {
 	}
 }
 
-// dispatchAllSelfMessages dispatches all pending self messages
+// dispatchAllSelfMessages dispatches all pending self messages.
+// Matches C++ node::dispatch_all_self_messages.
 func (n *Node) dispatchAllSelfMessages() int32 {
-	// TODO: implement message dispatch for self-addressed messages
-	return 0
+	ret := int32(0)
+
+	// recursive call will be ignored
+	if n.CheckFlag(types.NodeFlag_RecvSelfMsg) || n.CheckFlag(types.NodeFlag_InCallback) {
+		return ret
+	}
+	var fgd nodeFlagGuard
+	fgd.openFlag(n, types.NodeFlag_RecvSelfMsg)
+	defer fgd.closeFlag()
+
+	loopLeft := int(n.configure.LoopTimes)
+	if loopLeft <= 0 {
+		loopLeft = 10240
+	}
+
+	// Process self data messages
+	for loopLeft > 0 && n.selfDataMessages.Len() > 0 {
+		loopLeft--
+		front := n.selfDataMessages.Front()
+		if front == nil {
+			break
+		}
+		m := n.selfDataMessages.Remove(front).(*types.Message)
+
+		head := m.GetHead()
+		bodyType := m.GetBodyType()
+		if head == nil || bodyType == types.MessageBodyTypeUnknown {
+			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+				"head or body type unset")
+			continue
+		}
+
+		if bodyType == types.MessageBodyTypeDataTransformReq {
+			fwdData := m.GetBody().GetDataTransformReq()
+			if fwdData == nil {
+				continue
+			}
+			n.OnReceiveData(n.GetSelfEndpoint(), nil, m, fwdData.GetContent())
+			ret++
+
+			// fake response
+			if fwdData.GetFlags()&uint32(protocol.ATBUS_FORWARD_DATA_FLAG_TYPE_FORWARD_DATA_FLAG_REQUIRE_RSP) != 0 {
+				m.MutableHead().ResultCode = 0
+				// Move data_transform_req to data_transform_rsp (same ForwardData object)
+				reqWrapper, ok := m.MutableBody().MessageType.(*protocol.MessageBody_DataTransformReq)
+				if ok && reqWrapper != nil {
+					m.MutableBody().MessageType = &protocol.MessageBody_DataTransformRsp{
+						DataTransformRsp: reqWrapper.DataTransformReq,
+					}
+				}
+				n.OnReceiveForwardResponse(n.GetSelfEndpoint(), nil, m)
+			}
+		}
+	}
+
+	// Process self command messages
+	for loopLeft > 0 && n.selfCommandMessages.Len() > 0 {
+		loopLeft--
+		front := n.selfCommandMessages.Front()
+		if front == nil {
+			break
+		}
+		m := n.selfCommandMessages.Remove(front).(*types.Message)
+
+		head := m.GetHead()
+		bodyType := m.GetBodyType()
+		if head == nil || bodyType == types.MessageBodyTypeUnknown {
+			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+				"head or body type unset")
+			continue
+		}
+
+		n.onReceiveMessage(nil, m, 0, error_code.EN_ATBUS_ERR_SUCCESS)
+		ret++
+	}
+
+	return ret
 }
 
 // pingEndpoint sends a ping to an endpoint
@@ -1322,8 +1411,11 @@ func (n *Node) GetAccessCode() string {
 }
 
 func (n *Node) GetIoStreamChannel() types.IoStreamChannel {
-	// TODO: implement me
-	return nil
+	if n == nil {
+		return nil
+	}
+
+	return n.ioStreamChannel
 }
 
 func (n *Node) GetSelfEndpoint() types.Endpoint {
@@ -1453,8 +1545,14 @@ func (n *Node) sendMessage(tid types.BusIdType, message *types.Message, fn func(
 			return error_code.EN_ATBUS_ERR_ATNODE_INVALID_MSG, nil, nil
 		}
 
-		// TODO: Queue self data/command messages and dispatch
-		// self_data_messages_ / self_command_messages_ handling
+		// Queue self data/command messages
+		if bodyType == types.MessageBodyTypeDataTransformReq || bodyType == types.MessageBodyTypeDataTransformRsp {
+			n.selfDataMessages.PushBack(message)
+		}
+		if bodyType == types.MessageBodyTypeCustomCommandReq || bodyType == types.MessageBodyTypeCustomCommandRsp {
+			n.selfCommandMessages.PushBack(message)
+		}
+
 		n.dispatchAllSelfMessages()
 		return error_code.EN_ATBUS_ERR_SUCCESS, nil, nil
 	}
@@ -1718,13 +1816,73 @@ func (n *Node) OnPong(ep types.Endpoint, message *types.Message, body *protocol.
 	return code
 }
 
+func (n *Node) addEndpointFault(ep types.Endpoint, conn types.Connection) bool {
+	if n == nil || lu.IsNil(ep) {
+		return false
+	}
+
+	faultCount := ep.AddStatisticFault()
+	if faultCount >= uint64(n.configure.FaultTolerant) {
+		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT), error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
+			fmt.Sprintf("endpoint %d fault count %d exceeds threshold", ep.GetId(), faultCount))
+		n.RemoveEndpoint(ep)
+		return true
+	}
+
+	return false
+}
+
+func (n *Node) addConnectionFault(conn types.Connection) bool {
+	if n == nil || lu.IsNil(conn) {
+		return false
+	}
+
+	faultCount := conn.AddStatisticFault()
+	if faultCount >= uint64(n.configure.FaultTolerant) {
+		n.LogError(conn.GetBinding(), conn, int(error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT), error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
+			fmt.Sprintf("connection %d fault count %d exceeds threshold", conn.GetBinding().GetId(), faultCount))
+		conn.Reset()
+		return true
+	}
+
+	return false
+}
+
+// onReceiveMessage handles an incoming message, dispatching it and managing fault counters.
+// Matches C++ node::on_receive_message.
+func (n *Node) onReceiveMessage(conn types.Connection, m *types.Message, status int, errcode error_code.ErrorType) {
+	if int32(status) < 0 || int32(errcode) < 0 {
+		n.addEndpointFault(conn.GetBinding(), conn)
+		n.addConnectionFault(conn)
+		return
+	}
+
+	res := message_handle.DispatchMessage(n, conn, m, status, errcode)
+	if int32(res) < 0 {
+		n.addEndpointFault(conn.GetBinding(), conn)
+		n.addConnectionFault(conn)
+		return
+	}
+
+	if !lu.IsNil(conn) {
+		ep := conn.GetBinding()
+		if !lu.IsNil(ep) {
+			ep.ClearStatisticFault()
+		}
+		conn.ClearStatisticFault()
+	}
+}
+
 func (n *Node) DispatchAllSelfMessages() int32 {
-	return n.DispatchAllSelfMessages()
+	return n.dispatchAllSelfMessages()
 }
 
 func (n *Node) GetContext() context.Context {
-	// TODO: implement me
-	return nil
+	if n == nil {
+		return nil
+	}
+
+	return n.configure.EventLoopContext
 }
 
 func (n *Node) Shutdown(reason error_code.ErrorType) error_code.ErrorType {
