@@ -124,7 +124,7 @@
 | P1-3 | ✅ 已新增 `RemoveEndpointByID` | 对齐 C++ 的按 `bus_id_t` 删除入口 | `types/atbus_node.go`, `impl/atbus_node.go`, `atbus_node_test.go` |
 | P1-4 | ✅ XXTEA 已实现 | 已补齐实现与跨语言回归 | `atframe-utils-go/algorithm/crypto`, `impl/atbus_connection_context.go`, `impl/atbus_connection_context_test.go` |
 | P1-5 | ⚠️ 纯 ChaCha20 已实现 | 已补齐 cipher 列表一致性与 pack/unpack；仍建议补跨语言向量 | `impl/atbus_connection_context.go`, `impl/atbus_connection_context_test.go` |
-| P1-6 | ⚠️ 已新增 `Endpoint` / `Connection` 专项测试，并补充 `NodeRelationship` / `NodeMsg` 的无网络 parity tests；`NodeReg` 与更完整的网络消息矩阵仍需继续补齐 | 建立能直接兜住上述 P0/P1 问题的回归网 | `impl/atbus_endpoint_test.go`, `impl/atbus_connection_test.go`, `impl/atbus_node_relationship_test.go`, `impl/atbus_node_msg_test.go`, `impl/*_test.go` |
+| P1-6 | ⚠️ 已新增 `Endpoint` / `Connection` 专项测试，并继续补充 `NodeRelationship` / `NodeReg` / `NodeMsg` 的 parity tests；当前已覆盖 `copy_conf`、`set_hostname`、`custom_cmd`、`custom_cmd_by_temp_node`、`send_cmd_to_self`、`send_msg_to_self_and_need_rsp` 等 case 的无网络 / loopback 子集，更完整的注册与网络矩阵仍需继续补齐 | 建立能直接兜住上述 P0/P1 问题的回归网 | `impl/atbus_endpoint_test.go`, `impl/atbus_connection_test.go`, `impl/atbus_node_relationship_test.go`, `impl/atbus_node_reg_test.go`, `impl/atbus_node_msg_test.go`, `impl/*_test.go` |
 
 ### 4.3 待用专项测试确认的行为边界
 
@@ -183,9 +183,9 @@
 - `impl/atbus_connection_test.go`：✅ 已新增，后续继续补强 `atbus_connection` 的直接回归；
 - `impl/atbus_endpoint_test.go`：✅ 已新增，后续继续补强；
 - `impl/atbus_node_setup_test.go`；
-- `impl/atbus_node_relationship_test.go`：✅ 已新增，当前覆盖 `child_endpoint_opr` 对应的立即子节点增删与集合行为；
-- `impl/atbus_node_reg_test.go`；
-- `impl/atbus_node_msg_test.go`：✅ 已新增，当前覆盖 `send_cmd_to_self`、未初始化发送返回码、`message_size_limit` 的无网络子集；
+- `impl/atbus_node_relationship_test.go`：✅ 已新增，当前覆盖 `copy_conf`、`child_endpoint_opr`，以及端点增删生命周期回调回归；
+- `impl/atbus_node_reg_test.go`：✅ 已新增，当前覆盖 `set_hostname`；其余注册 / 拓扑 / close-connection 矩阵继续补齐；
+- `impl/atbus_node_msg_test.go`：✅ 已新增，当前覆盖 `send_cmd_to_self`、`custom_cmd`、`custom_cmd_by_temp_node`、`send_msg_to_self_and_need_rsp`、未初始化发送返回码、`message_size_limit` 的无网络 / loopback 子集；
 - `error_code/libatbus_error_test.go` 与现有 `connection_context` /
   `message_handle` 测试做定向补强，而不是重写。
 

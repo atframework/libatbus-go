@@ -143,6 +143,7 @@ func (c *Connection) Connect() types.ErrorType {
 
 	// Set status to connecting
 	c.status = types.ConnectionState_Connecting
+	c.setFlag(types.ConnectionFlag_RegFd, true)
 	c.setFlag(types.ConnectionFlag_ClientMode, true)
 
 	// Add to connecting list with timeout
@@ -165,7 +166,14 @@ func (c *Connection) Connect() types.ErrorType {
 	if concreteConn, ok := ioConn.(*io_stream.IoStreamConnection); ok {
 		c.ioStreamConnection = concreteConn
 	}
+	ioConn.SetPrivateData(c)
 	c.status = types.ConnectionState_Handshaking
+
+	ret = c.owner.OnNewConnection(c)
+	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
+		c.Reset()
+		return ret
+	}
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -200,20 +208,36 @@ func (c *Connection) Push(data []byte) types.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	if c.status != types.ConnectionState_Connected {
+	payloadSize := uint64(len(data))
+	c.statistic.PushStartTimes++
+	c.statistic.PushStartSize += payloadSize
+
+	if c.status != types.ConnectionState_Connected && c.status != types.ConnectionState_Handshaking {
+		c.statistic.PushFailedTimes++
+		c.statistic.PushFailedSize += payloadSize
 		return error_code.EN_ATBUS_ERR_CLOSING
 	}
 
 	if c.ioStreamConnection == nil {
+		c.statistic.PushFailedTimes++
+		c.statistic.PushFailedSize += payloadSize
 		return error_code.EN_ATBUS_ERR_NO_DATA
 	}
 
 	channel := c.getIoStreamChannel()
 	if channel == nil {
+		c.statistic.PushFailedTimes++
+		c.statistic.PushFailedSize += payloadSize
 		return error_code.EN_ATBUS_ERR_CHANNEL_NOT_SUPPORT
 	}
 
-	return channel.Send(c.ioStreamConnection, data)
+	ret := channel.Send(c.ioStreamConnection, data)
+	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
+		c.statistic.PushFailedTimes++
+		c.statistic.PushFailedSize += payloadSize
+	}
+
+	return ret
 }
 
 // getIoStreamChannel returns the IoStreamChannel from the owner node.

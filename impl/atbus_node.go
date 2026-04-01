@@ -212,6 +212,7 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 	}
 	ioStreamConf := n.GetIoStreamConfigure()
 	n.ioStreamChannel = io_stream.NewIoStreamChannel(n.configure.EventLoopContext, ioStreamConf)
+	n.setupIoStreamCallbacks()
 
 	// Create self endpoint
 	n.self = CreateEndpoint(n, id, int64(n.topologyData.Pid), n.topologyData.Hostname)
@@ -230,6 +231,148 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 	n.setState(types.NodeState_Inited)
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+func (n *Node) setupIoStreamCallbacks() {
+	if n == nil || n.ioStreamChannel == nil {
+		return
+	}
+
+	handles := n.ioStreamChannel.GetEventHandleSet()
+	handles.SetCallback(types.IoStreamCallbackEventType_Connected, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
+		n.onIoStreamConnected(conn, status, privData)
+	})
+	handles.SetCallback(types.IoStreamCallbackEventType_Accepted, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
+		n.onIoStreamAccepted(conn)
+	})
+	handles.SetCallback(types.IoStreamCallbackEventType_Received, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
+		n.onIoStreamReceived(conn, status, privData)
+	})
+	handles.SetCallback(types.IoStreamCallbackEventType_Disconnected, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
+		n.onIoStreamDisconnected(conn)
+	})
+	handles.SetCallback(types.IoStreamCallbackEventType_Written, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
+		n.onIoStreamWritten(conn, status, privData)
+	})
+}
+
+func (n *Node) onIoStreamConnected(ioConn types.IoStreamConnection, status int32, privData interface{}) {
+	// Match C++ connection::iostream_on_connected, which is only a channel-level placeholder.
+	// The actual outbound connection setup is handled in Connection.Connect(), mirroring
+	// C++ connection::iostream_on_connected_cb.
+	_ = n
+	_ = ioConn
+	_ = status
+	_ = privData
+}
+
+func (n *Node) onIoStreamAccepted(ioConn types.IoStreamConnection) {
+	if n == nil || ioConn == nil {
+		return
+	}
+
+	if existed, ok := ioConn.GetPrivateData().(*Connection); ok && existed != nil {
+		return
+	}
+
+	conn := CreateConnection(n, ioConn.GetAddress().GetAddress())
+	if conn == nil {
+		return
+	}
+
+	conn.setFlag(types.ConnectionFlag_RegFd, true)
+	conn.setFlag(types.ConnectionFlag_ServerMode, true)
+	conn.setStatus(types.ConnectionState_Handshaking)
+	if concreteConn, ok := ioConn.(*io_stream.IoStreamConnection); ok {
+		conn.SetIoStreamConnection(concreteConn)
+	}
+	ioConn.SetPrivateData(conn)
+
+	n.OnNewConnection(conn)
+}
+
+func (n *Node) onIoStreamReceived(ioConn types.IoStreamConnection, status int32, privData interface{}) {
+	if n == nil || ioConn == nil {
+		return
+	}
+
+	conn, ok := ioConn.GetPrivateData().(*Connection)
+	if !ok || conn == nil {
+		return
+	}
+
+	payload, ok := privData.([]byte)
+	if !ok || len(payload) == 0 {
+		return
+	}
+
+	// statistic — match C++ iostream_on_recv_cb pull tracking
+	conn.statistic.PullStartTimes++
+	conn.statistic.PullStartSize += uint64(len(payload))
+
+	msg := types.NewMessage()
+	errCode := conn.GetConnectionContext().UnpackMessage(msg, payload, int(n.GetConfigure().MessageSize))
+	n.onReceiveMessage(conn, msg, int(status), errCode)
+}
+
+func (n *Node) onIoStreamDisconnected(ioConn types.IoStreamConnection) {
+	if n == nil || ioConn == nil {
+		return
+	}
+
+	conn, ok := ioConn.GetPrivateData().(*Connection)
+	if !ok || conn == nil {
+		return
+	}
+
+	conn.SetIoStreamConnection(nil)
+	conn.setStatus(types.ConnectionState_Disconnected)
+	conn.Reset()
+}
+
+func (n *Node) onIoStreamWritten(ioConn types.IoStreamConnection, status int32, privData interface{}) {
+	if n == nil || ioConn == nil {
+		return
+	}
+
+	payloadSize := 0
+	if payload, ok := privData.([]byte); ok {
+		payloadSize = len(payload)
+	}
+
+	var conn *Connection
+	if existed, ok := ioConn.GetPrivateData().(*Connection); ok {
+		conn = existed
+	}
+
+	var ep types.Endpoint
+	if conn != nil {
+		ep = conn.GetBinding()
+	}
+
+	connAddr := ""
+	if addr := ioConn.GetAddress(); addr != nil {
+		connAddr = addr.GetAddress()
+	}
+
+	if status != 0 {
+		if conn != nil {
+			conn.statistic.PushFailedTimes++
+			conn.statistic.PushFailedSize += uint64(payloadSize)
+		}
+
+		n.LogError(ep, conn, int(status), error_code.ErrorType(status),
+			fmt.Sprintf("write data(%d bytes) to %s failed", payloadSize, connAddr))
+		return
+	}
+
+	if conn != nil {
+		conn.statistic.PushSuccessTimes++
+		conn.statistic.PushSuccessSize += uint64(payloadSize)
+	}
+
+	n.LogDebug(ep, conn, nil,
+		fmt.Sprintf("write data(%d bytes) to %s success", payloadSize, connAddr))
 }
 
 func (n *Node) ReloadCrypto(cryptoKeyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE,
@@ -983,11 +1126,9 @@ func (n *Node) SendCustomCommandWithOptions(tid types.BusIdType, args [][]byte, 
 		})
 	}
 
-	if len(n.configure.AccessTokens) > 0 {
-		message_handle.GenerateAccessDataForCustomCommand(body.MutableAccessKey(), selfId,
-			rand.Uint64(), rand.Uint64(), n.configure.AccessTokens, body,
-		)
-	}
+	message_handle.GenerateAccessDataForCustomCommand(body.MutableAccessKey(), selfId,
+		rand.Uint64(), rand.Uint64(), n.configure.AccessTokens, body,
+	)
 
 	ret, _, _ := n.SendDataMessage(tid, m, options)
 	return ret

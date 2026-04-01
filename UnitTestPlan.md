@@ -19,6 +19,8 @@
 
 - **保持 case 语义一致**：能复用 C++ case 名称的，优先用相同名称作为 `t.Run(...)` 名；
 - **保持核心时序目的**：不要用“直接改内部状态”替代真实注册 / 握手 / 路由过程；
+  但如果某个 case 的核心目标是 **消息编解码 + 回调顺序 + request/response 语义**，
+  可以使用成对的 loopback/mock connection 保留 pack/unpack 与消息流转，而不强制依赖真实 socket；
 - **缩短墙钟时间，但不改协议顺序**：优先通过 `Proc(now)` 驱动时间推进，
   只在 I/O flush 必须时使用短时间等待；
 - **网络重测试串行执行**：`node_reg` 与 `node_msg` 不并行跑；
@@ -44,15 +46,9 @@
 | `impl/atbus_connection_context_test.go` | 握手、压缩、加密、部分跨语言向量 |
 | `message_handle/atbus_message_handler_test.go` | body name、AccessData、dispatch 相关 |
 
-当前明显缺失的专项测试文件：
+当前仍需继续补齐的专项测试文件：
 
-- `impl/atbus_node_regression_test.go`
-- `impl/atbus_connection_test.go`
-- `impl/atbus_endpoint_test.go`
 - `impl/atbus_node_setup_test.go`
-- `impl/atbus_node_relationship_test.go`
-- `impl/atbus_node_reg_test.go`
-- `impl/atbus_node_msg_test.go`
 
 ---
 
@@ -70,10 +66,10 @@
 | `atbus_connection_context_crosslang_generator.cpp` | 10 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
 | `atbus_access_data_crosslang_generator.cpp` | 8 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
 | `atbus_message_handler_test.cpp` | 19 | 基本覆盖 | 修完 P0 Bug 后保留并补回归 |
-| `atbus_node_setup_test.cpp` | 3 | 缺失 | 新增 `impl/atbus_node_setup_test.go` |
-| `atbus_node_relationship_test.cpp` | 3 | 缺失 | 新增 `impl/atbus_node_relationship_test.go`，包含 `basic_test` |
-| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | 缺失 | 新增 `impl/atbus_node_reg_test.go`，覆盖 19 个非 mem/shm case |
-| `atbus_node_msg_test.cpp` | 23 | 缺失 | 新增 `impl/atbus_node_msg_test.go`，覆盖全部 23 个 case |
+| `atbus_node_setup_test.cpp` | 3 | 缺失 | 新增 `impl/atbus_node_setup_test.go`；`override_listen_path` / 名称解析相关 case 仍需评估 Go 等价覆盖点 |
+| `atbus_node_relationship_test.cpp` | 3 | 部分覆盖 | `impl/atbus_node_relationship_test.go` 已覆盖 `copy_conf`、`child_endpoint_opr`；`basic_test` 在 C++ 中被 `#if 0` 禁用，暂不作为必须通过项 |
+| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | 部分覆盖 | `impl/atbus_node_reg_test.go` 已覆盖 `set_hostname`；其余 18 个非 mem/shm case 继续补齐 |
+| `atbus_node_msg_test.cpp` | 23 | 部分覆盖 | `impl/atbus_node_msg_test.go` 已覆盖 `custom_cmd`、`custom_cmd_by_temp_node`、`send_cmd_to_self`、`send_msg_to_self_and_need_rsp` 以及若干 Go 侧回归子场景；其余 case 继续补齐 |
 
 补充说明：
 
@@ -146,9 +142,9 @@
 
 子测试：
 
-- `basic_test`
-- `copy_conf`
-- `child_endpoint_opr`
+- `basic_test`（C++ 上游当前 `#if 0` 禁用，Go 侧暂不作为必须项）
+- `copy_conf` ✅
+- `child_endpoint_opr` ✅
 
 ### 4.6 `impl/atbus_node_reg_test.go`
 
@@ -169,7 +165,7 @@
 - `reg_bro_success`
 - `conflict`
 - `reconnect_upstream_failed`
-- `set_hostname`
+- `set_hostname` ✅
 - `on_close_connection_normal`
 - `on_close_connection_by_peer`
 - `on_topology_upstream_set`
@@ -188,12 +184,12 @@
 必须覆盖的 **23** 个 case：
 
 - `ping_pong`
-- `custom_cmd`
-- `custom_cmd_by_temp_node`
-- `send_cmd_to_self`
+- `custom_cmd` ✅（使用 loopback connection 保留 pack/unpack 与 request/response 顺序）
+- `custom_cmd_by_temp_node` ✅（使用 loopback connection 保留 temporary-node 语义）
+- `send_cmd_to_self` ✅
 - `reset_and_send`
 - `send_loopback_error`
-- `send_msg_to_self_and_need_rsp`
+- `send_msg_to_self_and_need_rsp` ✅
 - `upstream_and_downstream`
 - `transfer_and_connect`
 - `transfer_only`
@@ -315,4 +311,4 @@
 2. 每个已确认的 P0 Bug 都有单独回归测试；
 3. `Node` / `Endpoint` / `Connection` 不再依赖“旁路覆盖”；
 4. 跨语言已有覆盖被保留，剩余算法缺口不会被静默忽略；
-5. 新增网络测试不会破坏原有测试目的，也不会把关键时序偷换成 mock。
+5. 新增测试不会破坏原有测试目的；其中 listen/connect/register/topology/close-connection 等网络时序 case 仍保持真实网络驱动，而纯消息 request/response 语义 case 允许使用 loopback/mock connection 做稳定单测。

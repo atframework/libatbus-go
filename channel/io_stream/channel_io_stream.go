@@ -606,6 +606,7 @@ func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
 // Returns false on write error.
 func (c *IoStreamChannel) writeFrameAndNotify(conn *IoStreamConnection, data []byte) bool {
 	conn.SetFlag(IoStreamConnectionFlagWriting, true)
+	payload := extractFramePayload(data)
 
 	// Write the frame
 	written := 0
@@ -613,6 +614,7 @@ func (c *IoStreamChannel) writeFrameAndNotify(conn *IoStreamConnection, data []b
 		n, err := conn.conn.Write(data[written:])
 		if err != nil {
 			conn.SetFlag(IoStreamConnectionFlagWriting, false)
+			c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, int32(error_code.EN_ATBUS_ERR_WRITE_FAILED), payload)
 			return false
 		}
 		written += n
@@ -622,13 +624,7 @@ func (c *IoStreamChannel) writeFrameAndNotify(conn *IoStreamConnection, data []b
 
 	// Fire written callback - extract payload from frame for callback
 	// Frame format: [hash:4][varint:N][payload]
-	if len(data) > HashSize {
-		payloadLen, headerSize, _ := TryUnpackFrameHeader(data)
-		if headerSize > 0 && len(data) >= headerSize+int(payloadLen) {
-			payload := data[headerSize : headerSize+int(payloadLen)]
-			c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
-		}
-	}
+	c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
 
 	return true
 }
@@ -684,6 +680,9 @@ func (c *IoStreamChannel) writeMergedFramesAndNotify(conn *IoStreamConnection, f
 		n, err := conn.conn.Write(merged[written:])
 		if err != nil {
 			conn.SetFlag(IoStreamConnectionFlagWriting, false)
+			for _, frame := range frames {
+				c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, int32(error_code.EN_ATBUS_ERR_WRITE_FAILED), extractFramePayload(frame))
+			}
 			return false
 		}
 		written += n
@@ -693,16 +692,23 @@ func (c *IoStreamChannel) writeMergedFramesAndNotify(conn *IoStreamConnection, f
 
 	// Fire written callbacks for each original frame
 	for _, frame := range frames {
-		if len(frame) > HashSize {
-			payloadLen, headerSize, _ := TryUnpackFrameHeader(frame)
-			if headerSize > 0 && len(frame) >= headerSize+int(payloadLen) {
-				payload := frame[headerSize : headerSize+int(payloadLen)]
-				c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, payload)
-			}
-		}
+		c.fireCallbackWithData(IoStreamCallbackEventTypeWritten, conn, 0, extractFramePayload(frame))
 	}
 
 	return true
+}
+
+func extractFramePayload(frame []byte) []byte {
+	if len(frame) <= HashSize {
+		return nil
+	}
+
+	payloadLen, headerSize, _ := TryUnpackFrameHeader(frame)
+	if headerSize <= 0 || len(frame) < headerSize+int(payloadLen) {
+		return nil
+	}
+
+	return frame[headerSize : headerSize+int(payloadLen)]
 }
 
 // drainRemainingWrites drains all pending write data from the queue, writing each frame.

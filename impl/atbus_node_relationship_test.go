@@ -2,6 +2,7 @@ package libatbus_impl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -9,6 +10,39 @@ import (
 	error_code "github.com/atframework/libatbus-go/error_code"
 	types "github.com/atframework/libatbus-go/types"
 )
+
+func TestNodeConfigureCopyAndNilDefaultHelpersMatchCppRelationshipCase(t *testing.T) {
+	// Arrange: populate a non-trivial configuration so the copied value has visible state.
+	var conf1 types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf1)
+	conf1.UpstreamAddress = "ipv4://127.0.0.1:12001"
+	conf1.TopologyLabels = map[string]string{"zone": "test-a", "role": "lobby"}
+	conf1.AccessTokens = [][]byte{[]byte("token-a"), []byte("token-b")}
+	conf1.LoopTimes = 512
+
+	var startConf types.StartConfigure
+	startConf.TimerTimepoint = time.Now()
+
+	// Act: copy the configuration by value, matching the C++ copy constructor coverage.
+	conf2 := conf1
+
+	// Assert: the copied value should preserve the original configuration fields.
+	assert.Equal(t, conf1, conf2)
+
+	// Act + Assert: nil inputs to default helpers must remain safe, matching the C++ smoke test.
+	require.NotPanics(t, func() {
+		types.SetDefaultNodeConfigure(nil)
+	})
+	require.NotPanics(t, func() {
+		types.SetDefaultStartConfigure(nil)
+	})
+
+	// Act: apply the start defaults to a populated struct.
+	types.SetDefaultStartConfigure(&startConf)
+
+	// Assert: start defaults should reset the timer timepoint.
+	assert.True(t, startConf.TimerTimepoint.Equal(time.Unix(0, 0)))
+}
 
 func TestChildEndpointOperationsMatchCppRelationshipCase(t *testing.T) {
 	// Arrange: initialize a node as the owner of all child endpoints.

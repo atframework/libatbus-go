@@ -66,6 +66,31 @@ func TestReloadCompression_NilReceiverReturnsParams(t *testing.T) {
 }
 
 // ============================================================================
+// setupIoStreamCallbacks — must register the same five channel callbacks as C++
+// Bug: Go only wired accepted/received/disconnected, missing connected/written.
+// Fix: Register connected/written as well.
+// ============================================================================
+
+func TestInit_RegistersIoStreamCallbacksMatchingCpp(t *testing.T) {
+	// Arrange
+	var n Node
+	ret := n.Init(0x1235, nil)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
+
+	// Act
+	channel := n.GetIoStreamChannel()
+	require.NotNil(t, channel)
+	handles := channel.GetEventHandleSet()
+
+	// Assert
+	assert.NotNil(t, handles.GetCallback(types.IoStreamCallbackEventType_Accepted))
+	assert.NotNil(t, handles.GetCallback(types.IoStreamCallbackEventType_Connected))
+	assert.NotNil(t, handles.GetCallback(types.IoStreamCallbackEventType_Disconnected))
+	assert.NotNil(t, handles.GetCallback(types.IoStreamCallbackEventType_Received))
+	assert.NotNil(t, handles.GetCallback(types.IoStreamCallbackEventType_Written))
+}
+
+// ============================================================================
 // Listen — guard must reject when self is nil, not when self is set
 // Bug: Guard condition was inverted — blocked calls when self was correctly set.
 // Fix: Changed n.self != nil to n.self == nil.
