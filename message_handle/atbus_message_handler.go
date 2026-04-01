@@ -45,7 +45,7 @@ func getConnectionBinding(conn types.Connection) types.Endpoint {
 		return nil
 	}
 
-	return getConnectionBinding(conn)
+	return conn.GetBinding()
 }
 
 // This file is a Go port of the core helpers in atframework/libatbus
@@ -489,7 +489,7 @@ func SendRegister(bodyType types.MessageBodyType, n types.Node, conn types.Conne
 
 func SendTransferResponse(n types.Node, m *Message, errcode error_code.ErrorType) error_code.ErrorType {
 	bodyType := m.GetBodyType()
-	if bodyType != types.MessageBodyTypeNodeRegisterReq && bodyType != types.MessageBodyTypeNodeRegisterRsp {
+	if bodyType != types.MessageBodyTypeDataTransformReq && bodyType != types.MessageBodyTypeDataTransformRsp {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 

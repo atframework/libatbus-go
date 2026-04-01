@@ -1,5 +1,5 @@
-github.com/atframework/atframe-utils-go v1.0.0 h1:sSgS76m1Ln214EgEzx2NY1ceUJdYaYKD4JAetY+h4jA=
-github.com/atframework/atframe-utils-go v1.0.0/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
+github.com/atframework/atframe-utils-go v1.0.4-0.20260331081003-8ea16273fe39 h1:DhNQ7vy4N3I3+KciiDUN86ncGRTlzn8IOD9mVF+H8y4=
+github.com/atframework/atframe-utils-go v1.0.4-0.20260331081003-8ea16273fe39/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/golang/snappy v0.0.4 h1:yAGX7huGHXlcLOEtBnF4w7FQwA26wojNCwOYAEhLjQM=

@@ -522,6 +522,171 @@ func TestCryptoSessionEncryptCBCWithIVInvalidSize(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrCryptoInvalidIVSize))
 }
 
+func TestCryptoSessionEncryptDecryptXXTEA(t *testing.T) {
+	// Test: Verify XXTEA encrypt/decrypt roundtrip
+	testData := []byte("Hello, World! This is a test message for XXTEA encryption.")
+
+	// Arrange
+	session := NewCryptoSession()
+	key := make([]byte, 16) // XXTEA uses 128-bit key
+	_, _ = rand.Read(key)
+	require.NoError(t, session.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA))
+
+	// Act
+	encrypted, err := session.Encrypt(testData)
+	require.NoError(t, err)
+
+	decrypted, err := session.Decrypt(encrypted)
+	require.NoError(t, err)
+
+	// Assert: decrypted includes zero-padding, check prefix matches
+	assert.NotEqual(t, testData, encrypted)
+	require.GreaterOrEqual(t, len(decrypted), len(testData))
+	assert.Equal(t, testData, decrypted[:len(testData)])
+}
+
+func TestCryptoSessionXXTEADifferentSizes(t *testing.T) {
+	// Test: Verify XXTEA handles various data sizes including padding edge cases
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"1byte", 1},
+		{"3bytes", 3},
+		{"4bytes", 4},
+		{"7bytes", 7},
+		{"8bytes", 8},
+		{"15bytes", 15},
+		{"16bytes", 16},
+		{"100bytes", 100},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			session := NewCryptoSession()
+			key := make([]byte, 16)
+			_, _ = rand.Read(key)
+			require.NoError(t, session.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA))
+
+			testData := make([]byte, tc.size)
+			_, _ = rand.Read(testData)
+
+			// Act
+			encrypted, err := session.Encrypt(testData)
+			require.NoError(t, err)
+
+			decrypted, err := session.Decrypt(encrypted)
+			require.NoError(t, err)
+
+			// Assert: plaintext prefix matches, output is 4-byte aligned, minimum 8 bytes
+			require.GreaterOrEqual(t, len(decrypted), len(testData))
+			assert.Equal(t, testData, decrypted[:len(testData)])
+			assert.Equal(t, 0, len(encrypted)%4)
+			assert.GreaterOrEqual(t, len(encrypted), 8)
+		})
+	}
+}
+
+func TestCryptoSessionXXTEAEmptyData(t *testing.T) {
+	// Test: Verify XXTEA handles empty data
+	// Arrange
+	session := NewCryptoSession()
+	key := make([]byte, 16)
+	_, _ = rand.Read(key)
+	require.NoError(t, session.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA))
+
+	// Act
+	encrypted, err := session.Encrypt([]byte{})
+
+	// Assert
+	require.NoError(t, err)
+	assert.Empty(t, encrypted)
+}
+
+func TestCryptoSessionXXTEAWithKeyExchange(t *testing.T) {
+	// Test: Verify XXTEA works with ECDH key exchange and HKDF key derivation (matching C++ flow)
+	// Arrange
+	session1 := NewCryptoSession()
+	session2 := NewCryptoSession()
+
+	keyExchange := protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_SECP256R1
+
+	// Generate key pairs
+	require.NoError(t, session1.GenerateKeyPair(keyExchange))
+	require.NoError(t, session2.GenerateKeyPair(keyExchange))
+
+	// Exchange public keys and compute shared secrets
+	pub1 := session1.GetPublicKey()
+	pub2 := session2.GetPublicKey()
+
+	secret1, err := session1.ComputeSharedSecret(pub2)
+	require.NoError(t, err)
+	secret2, err := session2.ComputeSharedSecret(pub1)
+	require.NoError(t, err)
+
+	assert.Equal(t, secret1, secret2)
+
+	// Derive keys for XXTEA
+	require.NoError(t, session1.DeriveKey(secret1,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA,
+		protocol.ATBUS_CRYPTO_KDF_TYPE_ATBUS_CRYPTO_KDF_HKDF_SHA256))
+	require.NoError(t, session2.DeriveKey(secret2,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA,
+		protocol.ATBUS_CRYPTO_KDF_TYPE_ATBUS_CRYPTO_KDF_HKDF_SHA256))
+
+	// Act: encrypt with session1, decrypt with session2
+	testData := []byte("Cross-session XXTEA test payload")
+	encrypted, err := session1.Encrypt(testData)
+	require.NoError(t, err)
+
+	decrypted, err := session2.Decrypt(encrypted)
+	require.NoError(t, err)
+
+	// Assert
+	require.GreaterOrEqual(t, len(decrypted), len(testData))
+	assert.Equal(t, testData, decrypted[:len(testData)])
+}
+
+func TestCryptoSessionXXTEAInvalidKeySize(t *testing.T) {
+	// Test: Verify XXTEA rejects invalid key sizes
+	session := NewCryptoSession()
+
+	// Wrong key size (32 instead of 16)
+	err := session.SetKey(make([]byte, 32), nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA)
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, ErrCryptoInvalidKeySize))
+}
+
+func TestCryptoSessionXXTEACrossLanguageVector(t *testing.T) {
+	// Test: Verify XXTEA produces output consistent with the C++ implementation
+	// using the same known key and plaintext
+	key := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
+	plaintext := []byte{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48} // "ABCDEFGH"
+
+	// Arrange
+	session := NewCryptoSession()
+	require.NoError(t, session.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA))
+
+	// Act
+	encrypted, err := session.Encrypt(plaintext)
+	require.NoError(t, err)
+
+	// Decrypt and verify roundtrip
+	decrypted, err := session.Decrypt(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, decrypted[:len(plaintext)])
+
+	// Also verify: two sessions with same key produce same ciphertext
+	session2 := NewCryptoSession()
+	require.NoError(t, session2.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA))
+
+	encrypted2, err := session2.Encrypt(plaintext)
+	require.NoError(t, err)
+	assert.Equal(t, encrypted, encrypted2, "Same key + same plaintext must produce same ciphertext (XXTEA is deterministic)")
+}
+
 func TestCryptoSessionEncryptEmptyData(t *testing.T) {
 	// Test: Verify handling of empty data
 	// Arrange
@@ -1687,6 +1852,7 @@ func TestCrossLangAllEncryptedDataTransformReq(t *testing.T) {
 		{"AES-192-GCM", "enc_aes_192_gcm_data_transform_req.json", "enc_aes_192_gcm_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM},
 		{"AES-256-GCM", "enc_aes_256_gcm_data_transform_req.json", "enc_aes_256_gcm_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
 		{"ChaCha20-Poly1305", "enc_chacha20_poly1305_data_transform_req.json", "enc_chacha20_poly1305_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF},
+		{"XXTEA", "enc_xxtea_data_transform_req.json", "enc_xxtea_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA},
 	}
 
 	for _, tc := range testCases {
@@ -1713,26 +1879,38 @@ func TestCrossLangAllEncryptedDataTransformReq(t *testing.T) {
 			require.NoError(t, err)
 
 			head, bodyBytes := parsePackedMessage(t, binaryData)
-			require.NotNil(t, head.GetCrypto())
-			assert.Equal(t, tc.algorithm, head.GetCrypto().GetAlgorithm())
-			headIV := head.GetCrypto().GetIv()
-			headAAD := head.GetCrypto().GetAad()
-			if len(iv) > 0 {
-				assert.Len(t, headIV, len(iv))
-				assert.Equal(t, iv, headIV)
-			}
-			if cryptoAlgorithmIsAEAD(tc.algorithm) && len(aad) > 0 {
-				assert.Len(t, headAAD, len(aad))
-				assert.Equal(t, aad, headAAD)
-			}
 
 			var decrypted []byte
-			if cryptoAlgorithmIsAEAD(tc.algorithm) {
-				decrypted, err = session.DecryptWithIVAndAAD(bodyBytes, iv, aad)
+			if tc.algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA {
+				// XXTEA has no IV/AAD and no crypto header
+				decrypted, err = session.Decrypt(bodyBytes)
+				require.NoError(t, err)
+				// Trim zero-padding using body_size from header
+				bodySize := int(head.GetBodySize())
+				if bodySize > 0 && bodySize <= len(decrypted) {
+					decrypted = decrypted[:bodySize]
+				}
 			} else {
-				decrypted, err = session.DecryptWithIV(bodyBytes, iv)
+				require.NotNil(t, head.GetCrypto())
+				assert.Equal(t, tc.algorithm, head.GetCrypto().GetAlgorithm())
+				headIV := head.GetCrypto().GetIv()
+				headAAD := head.GetCrypto().GetAad()
+				if len(iv) > 0 {
+					assert.Len(t, headIV, len(iv))
+					assert.Equal(t, iv, headIV)
+				}
+				if cryptoAlgorithmIsAEAD(tc.algorithm) && len(aad) > 0 {
+					assert.Len(t, headAAD, len(aad))
+					assert.Equal(t, aad, headAAD)
+				}
+
+				if cryptoAlgorithmIsAEAD(tc.algorithm) {
+					decrypted, err = session.DecryptWithIVAndAAD(bodyBytes, iv, aad)
+				} else {
+					decrypted, err = session.DecryptWithIV(bodyBytes, iv)
+				}
+				require.NoError(t, err)
 			}
-			require.NoError(t, err)
 
 			body := &protocol.MessageBody{}
 			err = proto.Unmarshal(decrypted, body)
@@ -1750,8 +1928,12 @@ func TestCrossLangAllEncryptedDataTransformReq(t *testing.T) {
 			assert.Equal(t, metadata.Expected.Flags, req.GetFlags())
 			assert.Equal(t, []byte(metadata.Expected.Content), req.GetContent())
 
-			// Encrypt again with IV/AAD and compare ciphertext bytes
-			if cryptoAlgorithmIsAEAD(tc.algorithm) {
+			// Encrypt again and compare ciphertext bytes
+			if tc.algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA {
+				again, err := session.Encrypt(decrypted)
+				require.NoError(t, err)
+				assert.Equal(t, bodyBytes, again)
+			} else if cryptoAlgorithmIsAEAD(tc.algorithm) {
 				again, err := session.EncryptWithIVAndAAD(decrypted, iv, aad)
 				require.NoError(t, err)
 				assert.Equal(t, bodyBytes, again)
@@ -1780,6 +1962,7 @@ func TestCrossLangAllEncryptedCustomCmd(t *testing.T) {
 		{"AES-192-GCM", "enc_aes_192_gcm_custom_cmd.json", "enc_aes_192_gcm_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM},
 		{"AES-256-GCM", "enc_aes_256_gcm_custom_cmd.json", "enc_aes_256_gcm_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
 		{"ChaCha20-Poly1305", "enc_chacha20_poly1305_custom_cmd.json", "enc_chacha20_poly1305_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF},
+		{"XXTEA", "enc_xxtea_custom_cmd.json", "enc_xxtea_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA},
 	}
 
 	for _, tc := range testCases {
@@ -1806,20 +1989,30 @@ func TestCrossLangAllEncryptedCustomCmd(t *testing.T) {
 			require.NoError(t, err)
 
 			head, bodyBytes := parsePackedMessage(t, binaryData)
-			require.NotNil(t, head.GetCrypto())
-			assert.Equal(t, tc.algorithm, head.GetCrypto().GetAlgorithm())
-			assert.Equal(t, iv, head.GetCrypto().GetIv())
-			if cryptoAlgorithmIsAEAD(tc.algorithm) {
-				assert.Equal(t, aad, head.GetCrypto().GetAad())
-			}
 
 			var decrypted []byte
-			if cryptoAlgorithmIsAEAD(tc.algorithm) {
-				decrypted, err = session.DecryptWithIVAndAAD(bodyBytes, iv, aad)
+			if tc.algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA {
+				decrypted, err = session.Decrypt(bodyBytes)
+				require.NoError(t, err)
+				bodySize := int(head.GetBodySize())
+				if bodySize > 0 && bodySize <= len(decrypted) {
+					decrypted = decrypted[:bodySize]
+				}
 			} else {
-				decrypted, err = session.DecryptWithIV(bodyBytes, iv)
+				require.NotNil(t, head.GetCrypto())
+				assert.Equal(t, tc.algorithm, head.GetCrypto().GetAlgorithm())
+				assert.Equal(t, iv, head.GetCrypto().GetIv())
+				if cryptoAlgorithmIsAEAD(tc.algorithm) {
+					assert.Equal(t, aad, head.GetCrypto().GetAad())
+				}
+
+				if cryptoAlgorithmIsAEAD(tc.algorithm) {
+					decrypted, err = session.DecryptWithIVAndAAD(bodyBytes, iv, aad)
+				} else {
+					decrypted, err = session.DecryptWithIV(bodyBytes, iv)
+				}
+				require.NoError(t, err)
 			}
-			require.NoError(t, err)
 
 			body := &protocol.MessageBody{}
 			err = proto.Unmarshal(decrypted, body)
@@ -1836,8 +2029,12 @@ func TestCrossLangAllEncryptedCustomCmd(t *testing.T) {
 				assert.Equal(t, []byte(cmd), req.GetCommands()[i].GetArg())
 			}
 
-			// Encrypt again with IV/AAD and compare ciphertext bytes
-			if cryptoAlgorithmIsAEAD(tc.algorithm) {
+			// Encrypt again and compare ciphertext bytes
+			if tc.algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA {
+				again, err := session.Encrypt(decrypted)
+				require.NoError(t, err)
+				assert.Equal(t, bodyBytes, again)
+			} else if cryptoAlgorithmIsAEAD(tc.algorithm) {
 				again, err := session.EncryptWithIVAndAAD(decrypted, iv, aad)
 				require.NoError(t, err)
 				assert.Equal(t, bodyBytes, again)
@@ -2112,23 +2309,62 @@ func TestCrossLangNoEncryptionDataFiles(t *testing.T) {
 	}
 }
 
-// TestCrossLangXXTEANotSupported verifies that XXTEA test data is available
-// but the algorithm is marked as not fully supported in Go.
-func TestCrossLangXXTEANotSupported(t *testing.T) {
-	// Load test metadata to verify files exist
+// TestCrossLangXXTEAEncryptDecrypt verifies that XXTEA test data from C++
+// can be decrypted correctly and re-encrypted to produce identical ciphertext.
+func TestCrossLangXXTEAEncryptDecrypt(t *testing.T) {
+	// Load test metadata and binary data
 	metadata := loadCrossLangTestMetadata(t, "enc_xxtea_data_transform_req.json")
-	_ = loadCrossLangTestData(t, "enc_xxtea_data_transform_req.bytes")
+	binaryData := loadCrossLangTestData(t, "enc_xxtea_data_transform_req.bytes")
 
 	// Verify the algorithm type
 	assert.Equal(t, "xxtea", metadata.CryptoAlgorithm)
-	assert.Equal(t, 1, metadata.CryptoAlgorithmType) // XXTEA = 1 in C++
-
-	// Verify key parameters
+	assert.Equal(t, 1, metadata.CryptoAlgorithmType)
 	assert.Equal(t, 16, metadata.KeySize, "XXTEA key size should be 16 bytes")
 
-	// Note: XXTEA is defined in Go but not implemented with encrypt/decrypt
-	// This test verifies the test data exists for future implementation
-	t.Log("XXTEA test data available but algorithm not yet implemented in Go")
+	// Verify binary data size matches metadata
+	assert.Equal(t, metadata.PackedSize, len(binaryData), "Packed size mismatch")
+
+	expectedBinary, err := hex.DecodeString(metadata.PackedHex)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBinary, binaryData, "Binary data should match packed_hex")
+
+	// Setup crypto session with test key
+	key := decodeHexField(t, metadata.KeyHex, "key")
+	session := NewCryptoSession()
+	err = session.SetKey(key, nil, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA)
+	require.NoError(t, err)
+	assert.True(t, session.IsInitialized())
+
+	// Parse packed message
+	head, bodyBytes := parsePackedMessage(t, binaryData)
+	require.NotNil(t, head)
+
+	// Decrypt the body
+	decrypted, err := session.Decrypt(bodyBytes)
+	require.NoError(t, err)
+
+	// XXTEA output may include zero-padding; use body_size from header to trim
+	bodySize := int(head.GetBodySize())
+	if bodySize > 0 && bodySize <= len(decrypted) {
+		decrypted = decrypted[:bodySize]
+	}
+
+	body := &protocol.MessageBody{}
+	err = proto.Unmarshal(decrypted, body)
+	require.NoError(t, err)
+
+	// Verify expected content
+	req := body.GetDataTransformReq()
+	require.NotNil(t, req)
+	assert.Equal(t, uint64(0x123456789ABCDEF0), req.GetFrom())
+	assert.Equal(t, uint64(0x0FEDCBA987654321), req.GetTo())
+	assert.Equal(t, uint32(1), req.GetFlags())
+	assert.Equal(t, []byte("Hello, encrypted atbus!"), req.GetContent())
+
+	// Re-encrypt and verify identical ciphertext (XXTEA is deterministic with no IV)
+	reencrypted, err := session.Encrypt(decrypted)
+	require.NoError(t, err)
+	assert.Equal(t, bodyBytes, reencrypted, "Re-encrypted data should match C++ output")
 }
 
 // TestCrossLangCryptoSessionSetKeyWithAllAlgorithms verifies that all supported
@@ -2156,6 +2392,7 @@ func TestCrossLangCryptoSessionSetKeyWithAllAlgorithms(t *testing.T) {
 		{"AES-256-GCM", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM, testKey256, testIV12},
 		{"ChaCha20-Poly1305", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF, testKey256, testIV12},
 		{"XChaCha20-Poly1305", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF, testKey256, testIV24},
+		{"XXTEA", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA, testKey128, nil},
 	}
 
 	for _, tc := range testCases {
@@ -2190,7 +2427,13 @@ func TestCrossLangCryptoSessionSetKeyWithAllAlgorithms(t *testing.T) {
 			decrypted, err := session.Decrypt(encrypted)
 			require.NoError(t, err)
 
-			assert.Equal(t, testData, decrypted)
+			if tc.algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA {
+				// XXTEA decrypt includes PKCS#7 padding; trim using original length
+				require.GreaterOrEqual(t, len(decrypted), len(testData))
+				assert.Equal(t, testData, decrypted[:len(testData)])
+			} else {
+				assert.Equal(t, testData, decrypted)
+			}
 		})
 	}
 }

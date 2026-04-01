@@ -266,7 +266,7 @@ func (n *Node) ReloadCompression(compressionAllowAlgorithms []protocol.ATBUS_COM
 
 	n.configure.CompressionAllowAlgorithms = compressionAllowAlgorithms
 	n.configure.CompressionLevel = compressionLevel
-	return error_code.EN_ATBUS_ERR_PARAMS
+	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func (n *Node) Start() error_code.ErrorType {
@@ -421,7 +421,10 @@ func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 	// Process ping timers
 	n.processPingTimers(now)
 
-	// Execute GC
+	// Dispatch self messages before GC (matching C++ proc() order)
+	ret += n.dispatchAllSelfMessages()
+
+	// Execute GC after dispatch
 	n.executeGC()
 
 	return ret, error_code.EN_ATBUS_ERR_SUCCESS
@@ -734,7 +737,7 @@ func (n *Node) Listen(address string) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
-	if n.self != nil {
+	if n.self == nil {
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
@@ -984,7 +987,7 @@ func (n *Node) GetPeerChannel(tid types.BusIdType, fn func(from types.Endpoint, 
 		return error_code.EN_ATBUS_ERR_PARAMS, nil, nil, nil
 	}
 
-	if n.self == nil || n.GetState() != types.NodeState_Created {
+	if n.self == nil || n.GetState() == types.NodeState_Created {
 		return error_code.EN_ATBUS_ERR_NOT_INITED, nil, nil, nil
 	}
 
@@ -1211,7 +1214,7 @@ func (n *Node) AddEndpoint(ep types.Endpoint) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	if ep.GetOwner() != nil {
+	if ep.GetOwner() != n {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
@@ -2560,7 +2563,7 @@ func (n *Node) removeChild(col *endpointCollection, tid types.BusIdType, expecte
 		}
 	}
 
-	return false
+	return true
 }
 
 // removeRouteCollection removes all endpoints from the collection

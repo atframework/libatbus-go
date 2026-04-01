@@ -72,6 +72,7 @@ func SetDefaultNodeConfigure(conf *NodeConfigure) {
 
 	conf.FirstIdleTimeout = 30 * time.Second
 	conf.PingInterval = 8 * time.Second
+	conf.RetryInterval = 3 * time.Second
 	conf.FaultTolerant = 2 // 允许最多失败2次，第3次直接失败，默认配置里3次ping包无响应则是最多24s可以发现节点下线
 	conf.BackLog = 256
 	conf.AccessTokenMaxNumber = 5

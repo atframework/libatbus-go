@@ -18,6 +18,7 @@ import (
 	"time"
 
 	compression "github.com/atframework/atframe-utils-go/algorithm/compression"
+	"github.com/atframework/atframe-utils-go/algorithm/crypto/xxtea"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/proto"
@@ -279,6 +280,7 @@ type CryptoSession struct {
 	// Cipher instances (cached for performance)
 	aeadCipher  cipher.AEAD
 	blockCipher cipher.Block
+	xxteaKey    *xxtea.Key
 
 	// Nonce counter for AEAD modes
 	nonceCounter uint64
@@ -490,6 +492,13 @@ func (cs *CryptoSession) initCipher() error {
 		}
 		cs.aeadCipher = aead
 
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
+		k, err := xxtea.Setup(cs.Key)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrCryptoAlgorithmNotSupported, err)
+		}
+		cs.xxteaKey = &k
+
 	default:
 		return fmt.Errorf("%w: %s", ErrCryptoAlgorithmNotSupported, cryptoAlgorithmString(cs.Algorithm))
 	}
@@ -528,6 +537,9 @@ func (cs *CryptoSession) Encrypt(plaintext []byte) ([]byte, error) {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.encryptCBC(plaintext)
+
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
+		return cs.encryptXXTEA(plaintext)
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrCryptoAlgorithmNotSupported, cryptoAlgorithmString(cs.Algorithm))
@@ -585,6 +597,9 @@ func (cs *CryptoSession) EncryptWithIV(plaintext []byte, iv []byte) ([]byte, err
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.encryptCBCWithIV(plaintext, iv)
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
+		// XXTEA has no IV, ignore the provided IV
+		return cs.encryptXXTEA(plaintext)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrCryptoAlgorithmNotSupported, cryptoAlgorithmString(cs.Algorithm))
 	}
@@ -685,6 +700,50 @@ func (cs *CryptoSession) encryptCBCWithIV(plaintext []byte, iv []byte) ([]byte, 
 	return ciphertext, nil
 }
 
+// encryptXXTEA encrypts using XXTEA algorithm.
+// Applies PKCS#7 padding to 4-byte boundary before encryption (matching C++ behavior).
+// Caller must hold the lock.
+func (cs *CryptoSession) encryptXXTEA(plaintext []byte) ([]byte, error) {
+	if cs.xxteaKey == nil {
+		return nil, ErrCryptoNotInitialized
+	}
+
+	// Apply PKCS#7 padding to 4-byte boundary (matching C++ pack_message_with)
+	const blockSize = 4
+	padding := blockSize - (len(plaintext) % blockSize)
+	paddedLen := len(plaintext) + padding
+	if paddedLen < 8 {
+		paddedLen = 8
+	}
+	padded := make([]byte, paddedLen)
+	copy(padded, plaintext)
+	for i := len(plaintext); i < len(plaintext)+padding; i++ {
+		padded[i] = byte(padding)
+	}
+
+	err := xxtea.EncryptInPlace(cs.xxteaKey, padded)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoEncryptFailed, err)
+	}
+	return padded, nil
+}
+
+// decryptXXTEA decrypts using XXTEA algorithm.
+// Returns decrypted data including PKCS#7 padding bytes.
+// The caller should use body_size from the message header to truncate to the original size.
+// Caller must hold the lock.
+func (cs *CryptoSession) decryptXXTEA(ciphertext []byte) ([]byte, error) {
+	if cs.xxteaKey == nil {
+		return nil, ErrCryptoNotInitialized
+	}
+
+	result, err := xxtea.Decrypt(cs.xxteaKey, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoDecryptFailed, err)
+	}
+	return result, nil
+}
+
 // Decrypt decrypts the ciphertext data.
 func (cs *CryptoSession) Decrypt(ciphertext []byte) ([]byte, error) {
 	cs.mu.RLock()
@@ -716,6 +775,9 @@ func (cs *CryptoSession) Decrypt(ciphertext []byte) ([]byte, error) {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.decryptCBC(ciphertext)
+
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
+		return cs.decryptXXTEA(ciphertext)
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrCryptoAlgorithmNotSupported, cryptoAlgorithmString(cs.Algorithm))
@@ -778,6 +840,9 @@ func (cs *CryptoSession) DecryptWithIV(ciphertext []byte, iv []byte) ([]byte, er
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.decryptCBCWithIV(ciphertext, iv)
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
+		// XXTEA has no IV, ignore the provided IV
+		return cs.decryptXXTEA(ciphertext)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrCryptoAlgorithmNotSupported, cryptoAlgorithmString(cs.Algorithm))
 	}

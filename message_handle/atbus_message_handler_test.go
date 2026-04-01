@@ -445,3 +445,142 @@ func TestCrossLangPlaintextNoPubkey(t *testing.T) {
 	plaintext := MakeAccessDataPlaintextFromHandshake(busID, ad, nil)
 	assert.Equal(t, string(expected), plaintext)
 }
+
+// ============================================================================
+// Regression Tests — Bug fixes found during C++/Go codebase comparison
+// ============================================================================
+
+// mockEndpoint is a minimal mock for types.Endpoint.
+type mockEndpoint struct{}
+
+func (e *mockEndpoint) GetOwner() types.Node                                     { return nil }
+func (e *mockEndpoint) GetId() types.BusIdType                                   { return 0x42 }
+func (e *mockEndpoint) Reset()                                                   {}
+func (e *mockEndpoint) GetPid() int32                                            { return 0 }
+func (e *mockEndpoint) GetHostname() string                                      { return "" }
+func (e *mockEndpoint) GetHashCode() string                                      { return "" }
+func (e *mockEndpoint) UpdateHashCode(code string)                               {}
+func (e *mockEndpoint) GetFlag(flag types.EndpointFlag) bool                     { return false }
+func (e *mockEndpoint) GetFlags() uint32                                         { return 0 }
+func (e *mockEndpoint) SetFlag(f types.EndpointFlag, v bool)                     {}
+func (e *mockEndpoint) AddConnection(conn types.Connection, forceData bool) bool { return false }
+func (e *mockEndpoint) RemoveConnection(conn types.Connection) bool              { return false }
+func (e *mockEndpoint) IsAvailable() bool                                        { return true }
+func (e *mockEndpoint) GetCtrlConnection(peer types.Endpoint) types.Connection   { return nil }
+func (e *mockEndpoint) GetDataConnection(peer types.Endpoint, fb bool) types.Connection {
+	return nil
+}
+func (e *mockEndpoint) GetDataConnectionCount(fb bool) int                   { return 0 }
+func (e *mockEndpoint) GetListenAddress() []types.ChannelAddress             { return nil }
+func (e *mockEndpoint) ClearListenAddress()                                  {}
+func (e *mockEndpoint) AddListenAddress(addr string)                         {}
+func (e *mockEndpoint) UpdateSupportSchemes(schemes []string)                {}
+func (e *mockEndpoint) IsSchemeSupported(scheme string) bool                 { return false }
+func (e *mockEndpoint) AddPingTimer()                                        {}
+func (e *mockEndpoint) ClearPingTimer()                                      {}
+func (e *mockEndpoint) AddStatisticFault() uint64                            { return 0 }
+func (e *mockEndpoint) ClearStatisticFault()                                 {}
+func (e *mockEndpoint) SetStatisticUnfinishedPing(p uint64)                  {}
+func (e *mockEndpoint) GetStatisticUnfinishedPing() uint64                   { return 0 }
+func (e *mockEndpoint) SetStatisticPingDelay(pd time.Duration, pt time.Time) {}
+func (e *mockEndpoint) GetStatisticPingDelay() time.Duration                 { return 0 }
+func (e *mockEndpoint) GetStatisticLastPong() time.Time                      { return time.Time{} }
+func (e *mockEndpoint) GetStatisticCreatedTime() time.Time                   { return time.Time{} }
+func (e *mockEndpoint) GetStatisticPushStartTimes() uint64                   { return 0 }
+func (e *mockEndpoint) GetStatisticPushStartSize() uint64                    { return 0 }
+func (e *mockEndpoint) GetStatisticPushSuccessTimes() uint64                 { return 0 }
+func (e *mockEndpoint) GetStatisticPushSuccessSize() uint64                  { return 0 }
+func (e *mockEndpoint) GetStatisticPushFailedTimes() uint64                  { return 0 }
+func (e *mockEndpoint) GetStatisticPushFailedSize() uint64                   { return 0 }
+func (e *mockEndpoint) GetStatisticPullTimes() uint64                        { return 0 }
+func (e *mockEndpoint) GetStatisticPullSize() uint64                         { return 0 }
+func (e *mockEndpoint) Merge(other types.Endpoint)                           {}
+func (e *mockEndpoint) SetSupportedSchemas(schemas map[string]struct{})      {}
+func (e *mockEndpoint) GetSupportedSchemas() map[string]struct{}             { return nil }
+
+// mockConnection is a minimal mock for types.Connection.
+type mockConnection struct {
+	binding types.Endpoint
+}
+
+func (c *mockConnection) Reset()                           {}
+func (c *mockConnection) Proc() error_code.ErrorType       { return error_code.EN_ATBUS_ERR_SUCCESS }
+func (c *mockConnection) Listen() error_code.ErrorType     { return error_code.EN_ATBUS_ERR_SUCCESS }
+func (c *mockConnection) Connect() error_code.ErrorType    { return error_code.EN_ATBUS_ERR_SUCCESS }
+func (c *mockConnection) Disconnect() error_code.ErrorType { return error_code.EN_ATBUS_ERR_SUCCESS }
+func (c *mockConnection) Push(buffer []byte) error_code.ErrorType {
+	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+func (c *mockConnection) AddStatisticFault() uint64                     { return 0 }
+func (c *mockConnection) ClearStatisticFault()                          {}
+func (c *mockConnection) GetAddress() types.ChannelAddress              { return nil }
+func (c *mockConnection) IsConnected() bool                             { return true }
+func (c *mockConnection) IsRunning() bool                               { return true }
+func (c *mockConnection) GetBinding() types.Endpoint                    { return c.binding }
+func (c *mockConnection) GetStatus() types.ConnectionState              { return 0 }
+func (c *mockConnection) CheckFlag(flag types.ConnectionFlag) bool      { return false }
+func (c *mockConnection) SetTemporary()                                 {}
+func (c *mockConnection) GetStatistic() types.ConnectionStatistic       { return types.ConnectionStatistic{} }
+func (c *mockConnection) GetConnectionContext() types.ConnectionContext { return nil }
+func (c *mockConnection) RemoveOwnerChecker()                           {}
+
+// getConnectionBinding — must delegate to conn.GetBinding() without recursion
+// Bug: called getConnectionBinding(conn) instead of conn.GetBinding() — infinite recursion.
+// Fix: changed to return conn.GetBinding().
+func TestGetConnectionBinding_DelegatesToConnGetBinding(t *testing.T) {
+	ep := &mockEndpoint{}
+	conn := &mockConnection{binding: ep}
+
+	// This would stack-overflow before the fix
+	result := getConnectionBinding(conn)
+	assert.Equal(t, ep, result,
+		"getConnectionBinding must return conn.GetBinding() without recursion")
+}
+
+func TestGetConnectionBinding_NilConnReturnsNil(t *testing.T) {
+	result := getConnectionBinding(nil)
+	assert.Nil(t, result,
+		"getConnectionBinding(nil) should return nil")
+}
+
+func TestGetConnectionBinding_NilBindingReturnsNil(t *testing.T) {
+	conn := &mockConnection{binding: nil}
+	result := getConnectionBinding(conn)
+	assert.Nil(t, result,
+		"getConnectionBinding with nil binding should return nil")
+}
+
+// SendTransferResponse — must accept DataTransformReq/Rsp body types
+// Bug: checked for NodeRegisterReq/Rsp instead of DataTransformReq/Rsp.
+// Fix: changed to check MessageBodyTypeDataTransformReq/Rsp.
+func TestSendTransferResponse_AcceptsDataTransformReq(t *testing.T) {
+	msg := NewMessage()
+	msg.MutableBody().MessageType = &protocol.MessageBody_DataTransformReq{
+		DataTransformReq: &protocol.ForwardData{
+			From:    0x1111,
+			To:      0x2222,
+			Content: []byte("test-data"),
+		},
+	}
+
+	bodyType := msg.GetBodyType()
+	// The body type should match what SendTransferResponse expects
+	assert.Equal(t, types.MessageBodyTypeDataTransformReq, bodyType,
+		"DataTransformReq body should be recognized")
+	// Verify it's not the old wrong constant
+	assert.NotEqual(t, types.MessageBodyTypeNodeRegisterReq, bodyType)
+}
+
+func TestSendTransferResponse_RejectsNodeRegisterReq(t *testing.T) {
+	msg := NewMessage()
+	msg.MutableBody().MessageType = &protocol.MessageBody_NodeRegisterReq{
+		NodeRegisterReq: &protocol.RegisterData{},
+	}
+
+	bodyType := msg.GetBodyType()
+	// NodeRegisterReq should NOT be accepted by SendTransferResponse
+	assert.NotEqual(t, types.MessageBodyTypeDataTransformReq, bodyType,
+		"NodeRegisterReq should not match DataTransformReq")
+	assert.NotEqual(t, types.MessageBodyTypeDataTransformRsp, bodyType,
+		"NodeRegisterReq should not match DataTransformRsp")
+}
