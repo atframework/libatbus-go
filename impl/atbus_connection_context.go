@@ -19,6 +19,7 @@ import (
 
 	compression "github.com/atframework/atframe-utils-go/algorithm/compression"
 	"github.com/atframework/atframe-utils-go/algorithm/crypto/xxtea"
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/proto"
@@ -451,6 +452,10 @@ func (cs *CryptoSession) SetKey(key, iv []byte, algorithm protocol.ATBUS_CRYPTO_
 // initCipher initializes the cipher based on the algorithm.
 // Caller must hold the lock.
 func (cs *CryptoSession) initCipher() error {
+	cs.aeadCipher = nil
+	cs.blockCipher = nil
+	cs.xxteaKey = nil
+
 	switch cs.Algorithm {
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE:
 		return nil
@@ -484,6 +489,11 @@ func (cs *CryptoSession) initCipher() error {
 			return fmt.Errorf("%w: %v", ErrCryptoAlgorithmNotSupported, err)
 		}
 		cs.aeadCipher = aead
+
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
+		if _, err := chacha20.NewUnauthenticatedCipher(cs.Key, cs.IV); err != nil {
+			return fmt.Errorf("%w: %v", ErrCryptoAlgorithmNotSupported, err)
+		}
 
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF:
 		aead, err := chacha20poly1305.NewX(cs.Key)
@@ -537,6 +547,9 @@ func (cs *CryptoSession) Encrypt(plaintext []byte) ([]byte, error) {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.encryptCBC(plaintext)
+
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
+		return cs.encryptChaCha20(plaintext)
 
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
 		return cs.encryptXXTEA(plaintext)
@@ -597,6 +610,8 @@ func (cs *CryptoSession) EncryptWithIV(plaintext []byte, iv []byte) ([]byte, err
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.encryptCBCWithIV(plaintext, iv)
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
+		return cs.encryptChaCha20WithIV(plaintext, iv)
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
 		// XXTEA has no IV, ignore the provided IV
 		return cs.encryptXXTEA(plaintext)
@@ -700,6 +715,44 @@ func (cs *CryptoSession) encryptCBCWithIV(plaintext []byte, iv []byte) ([]byte, 
 	return ciphertext, nil
 }
 
+// encryptChaCha20 encrypts using the pure ChaCha20 stream cipher.
+// The generated nonce is prepended to the ciphertext for the generic Encrypt API.
+// Caller must hold the lock.
+func (cs *CryptoSession) encryptChaCha20(plaintext []byte) ([]byte, error) {
+	nonceSize := cryptoAlgorithmIVSize(cs.Algorithm)
+	nonce := make([]byte, nonceSize)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoEncryptFailed, err)
+	}
+
+	ciphertext, err := cs.encryptChaCha20WithIV(plaintext, nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]byte, nonceSize+len(ciphertext))
+	copy(result[:nonceSize], nonce)
+	copy(result[nonceSize:], ciphertext)
+	return result, nil
+}
+
+// encryptChaCha20WithIV encrypts using the pure ChaCha20 stream cipher and a caller-provided nonce.
+// Caller must hold the lock.
+func (cs *CryptoSession) encryptChaCha20WithIV(plaintext []byte, iv []byte) ([]byte, error) {
+	if len(iv) != chacha20.NonceSize {
+		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.NonceSize, len(iv))
+	}
+
+	stream, err := chacha20.NewUnauthenticatedCipher(cs.Key, iv)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoEncryptFailed, err)
+	}
+
+	ciphertext := make([]byte, len(plaintext))
+	stream.XORKeyStream(ciphertext, plaintext)
+	return ciphertext, nil
+}
+
 // encryptXXTEA encrypts using XXTEA algorithm.
 // Applies PKCS#7 padding to 4-byte boundary before encryption (matching C++ behavior).
 // Caller must hold the lock.
@@ -776,6 +829,9 @@ func (cs *CryptoSession) Decrypt(ciphertext []byte) ([]byte, error) {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.decryptCBC(ciphertext)
 
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
+		return cs.decryptChaCha20(ciphertext)
+
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
 		return cs.decryptXXTEA(ciphertext)
 
@@ -840,6 +896,8 @@ func (cs *CryptoSession) DecryptWithIV(ciphertext []byte, iv []byte) ([]byte, er
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC:
 		return cs.decryptCBCWithIV(ciphertext, iv)
+	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
+		return cs.decryptChaCha20WithIV(ciphertext, iv)
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA:
 		// XXTEA has no IV, ignore the provided IV
 		return cs.decryptXXTEA(ciphertext)
@@ -958,6 +1016,35 @@ func (cs *CryptoSession) decryptCBCWithIV(ciphertext []byte, iv []byte) ([]byte,
 	}
 
 	return plaintext[:len(plaintext)-padding], nil
+}
+
+// decryptChaCha20 decrypts using the pure ChaCha20 stream cipher.
+// The generic Decrypt API expects the nonce to be prepended to ciphertext.
+// Caller must hold the lock.
+func (cs *CryptoSession) decryptChaCha20(ciphertext []byte) ([]byte, error) {
+	nonceSize := cryptoAlgorithmIVSize(cs.Algorithm)
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("%w: ciphertext too short", ErrCryptoDecryptFailed)
+	}
+
+	return cs.decryptChaCha20WithIV(ciphertext[nonceSize:], ciphertext[:nonceSize])
+}
+
+// decryptChaCha20WithIV decrypts using the pure ChaCha20 stream cipher and a caller-provided nonce.
+// Caller must hold the lock.
+func (cs *CryptoSession) decryptChaCha20WithIV(ciphertext []byte, iv []byte) ([]byte, error) {
+	if len(iv) != chacha20.NonceSize {
+		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.NonceSize, len(iv))
+	}
+
+	stream, err := chacha20.NewUnauthenticatedCipher(cs.Key, iv)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoDecryptFailed, err)
+	}
+
+	plaintext := make([]byte, len(ciphertext))
+	stream.XORKeyStream(plaintext, ciphertext)
+	return plaintext, nil
 }
 
 // CompressionSession handles compression and decompression.
@@ -1098,6 +1185,8 @@ func NegotiateCryptoAlgorithm(local, remote []protocol.ATBUS_CRYPTO_ALGORITHM_TY
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE,
 	}
 
@@ -1188,6 +1277,8 @@ func NewConnectionContext(keyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYP
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF,
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC,
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC,
+			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20,
+			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA,
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE,
 		},
 		supportedCompressionAlgorithms: nil,

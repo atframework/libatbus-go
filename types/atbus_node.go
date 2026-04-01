@@ -339,6 +339,10 @@ type Node interface {
 	// Return: 0 或错误码。
 	RemoveEndpoint(ep Endpoint) ErrorType
 
+	// RemoveEndpointByID 按 bus id 移除目标端点。
+	// Return: 0 或错误码。
+	RemoveEndpointByID(tid BusIdType) ErrorType
+
 	// IsEndpointAvailable 是否有到对端的数据通道（可以向对端发送数据）。
 	// Note: 如果只有控制通道没有数据通道，返回 false。
 	IsEndpointAvailable(tid BusIdType) bool

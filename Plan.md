@@ -22,7 +22,8 @@
   根包公开 API 暴露不足、缺少专项测试拖住了。
 - `atbus_connection_context`、`protocol`、`topology`、`buffer`、`io_stream`
   比旧计划写得更完整；旧计划把一部分已实现能力错写成了缺失。
-- 跨语言互通的主要剩余缺口集中在 **XXTEA** 与 **纯 ChaCha20**。
+- 此前跨语言互通的主要缺口集中在 **XXTEA** 与 **纯 ChaCha20**；
+  当前两者的实现已经补齐。
   AES/CBC、AES/GCM、ChaCha20-Poly1305、XChaCha20-Poly1305、压缩、
   AccessData/HMAC、握手确认流程已经有实现基础，并且现有 Go 测试已覆盖相当一部分。
 
@@ -35,7 +36,7 @@
 | `atbus_node` | ❌ 关键路径待修复 | 主体接口存在 | `Listen` / `GetPeerChannel` / `AddEndpoint` / `RemoveEndpoint` 相关逻辑存在确认缺陷，且缺少专项测试 |
 | `atbus_endpoint` | ⚠️ 基础能力在 | 统计、连接选择、listen 地址管理主体已在 | 受 `Node` 集成问题影响；缺少 dedicated parity tests |
 | `atbus_connection` | ⚠️ 基础能力在 | 生命周期主体存在；不支持 `mem://` / `shm://` 属设计范围 | 根包未给出清晰公开创建入口；缺少专项回归测试 |
-| `atbus_connection_context` | ⚠️ 大部分已对齐 | 握手、HKDF、压缩、主流 cipher 已在 | XXTEA 与纯 ChaCha20 仍缺 |
+| `atbus_connection_context` | ⚠️ 大部分已对齐 | 握手、HKDF、压缩、主流 cipher、XXTEA、纯 ChaCha20 已在 | 继续补 pure ChaCha20 的跨语言向量与更多回归 |
 | `atbus_message_handler` | ⚠️ 基本对齐 | 功能面与 C++ 接近 | 已确认 2 个 P0 Bug |
 | `atbus_topology` | ✅ 已对齐 | 接口和核心行为已基本对齐 | 保持回归测试即可 |
 | `channel/io_stream` | ✅ 已对齐 | TCP / Unix / pipe 风格 I/O 流能力基本齐 | 无需新增 mem/shm 能力 |
@@ -118,12 +119,12 @@
 
 | 编号 | 问题 | 目标 | 涉及文件 |
 | ------ | ------ | ------ | ---------- |
-| P1-1 | 根包只暴露 type alias，没有清晰的 `CreateNode` / `NewNode` 公开入口 | 对齐主要对外接口，至少给出清晰创建路径 | `atbus_node.go`, `impl/atbus_node.go` |
-| P1-2 | `Endpoint` / `Connection` 的创建入口停留在 `impl` 包 | 明确这是设计选择，或提供对等公开 helper | `atbus_endpoint.go`, `atbus_connection.go`, `impl/*` |
-| P1-3 | Go `RemoveEndpoint` 公开 API 以 endpoint 对象为入参，C++ 公开 API 以 `bus_id_t` 为主 | 增补 `RemoveEndpointByID` 或等价能力，避免外部接口长期偏离 | `types/atbus_node.go`, `impl/atbus_node.go` |
-| P1-4 | XXTEA 仍未实现 | 补齐跨语言算法接口 | `atframe-utils-go/algorithm/crypto`, `impl/atbus_connection_context.go` |
-| P1-5 | 纯 ChaCha20 仍未实现 | 补齐与 C++ 的 cipher 列表一致性 | `impl/atbus_connection_context.go` |
-| P1-6 | `Node` / `Endpoint` / `Connection` 缺少专门 parity tests | 建立能直接兜住上述 P0/P1 问题的回归网 | `impl/*_test.go` |
+| P1-1 | ✅ 根包已新增清晰的 `CreateNode` / `NewNode` 公开入口 | 继续通过根包测试锁定公开用法 | `atbus_node.go`, `atbus_node_test.go` |
+| P1-2 | ✅ `Endpoint` / `Connection` 已提供根包公开 helper | 继续通过根包测试锁定创建路径 | `atbus_endpoint.go`, `atbus_connection.go`, `atbus_*_test.go` |
+| P1-3 | ✅ 已新增 `RemoveEndpointByID` | 对齐 C++ 的按 `bus_id_t` 删除入口 | `types/atbus_node.go`, `impl/atbus_node.go`, `atbus_node_test.go` |
+| P1-4 | ✅ XXTEA 已实现 | 已补齐实现与跨语言回归 | `atframe-utils-go/algorithm/crypto`, `impl/atbus_connection_context.go`, `impl/atbus_connection_context_test.go` |
+| P1-5 | ⚠️ 纯 ChaCha20 已实现 | 已补齐 cipher 列表一致性与 pack/unpack；仍建议补跨语言向量 | `impl/atbus_connection_context.go`, `impl/atbus_connection_context_test.go` |
+| P1-6 | ⚠️ 已新增 `Endpoint` / `Connection` 专项测试，并补充 `NodeRelationship` / `NodeMsg` 的无网络 parity tests；`NodeReg` 与更完整的网络消息矩阵仍需继续补齐 | 建立能直接兜住上述 P0/P1 问题的回归网 | `impl/atbus_endpoint_test.go`, `impl/atbus_connection_test.go`, `impl/atbus_node_relationship_test.go`, `impl/atbus_node_msg_test.go`, `impl/*_test.go` |
 
 ### 4.3 待用专项测试确认的行为边界
 
@@ -148,13 +149,14 @@
 | ChaCha20-Poly1305 / XChaCha20-Poly1305 | ✅ | 已实现 |
 | Zstd / LZ4 / Snappy / Zlib | ✅ | 已实现 |
 | Key renegotiation + handshake confirm | ✅ | server stage / client confirm 流程已在 |
-| 纯 ChaCha20 | ❌ | 仍缺 |
-| XXTEA | ❌ | 仍缺 |
+| 纯 ChaCha20 | ⚠️ | 已补齐实现、协商与 pack/unpack；建议继续补 C++ 跨语言向量 |
+| XXTEA | ✅ | 已实现并有跨语言测试 |
 
 结论：
 
 - 如果只考虑当前已实现算法集合，Go 与 C++ 的跨语言互通基础已经具备；
-- 如果目标是 **“算法接口列表也一致”**，则还必须补齐 XXTEA 与纯 ChaCha20；
+- 如果目标是 **“算法接口列表也一致”**，XXTEA 与纯 ChaCha20 已补齐；
+- 如果目标还包括 **“纯 ChaCha20 的跨语言向量全覆盖”**，则仍需继续补测试；
 - `mem://` / `shm://` 不应重新纳入范围。
 
 ---
@@ -178,12 +180,12 @@
 建议新增 / 补强的测试文件：
 
 - `impl/atbus_node_regression_test.go`：先兜住本次已确认的 P0 Bug；
-- `impl/atbus_connection_test.go`：补 `atbus_connection` 的直接回归；
-- `impl/atbus_endpoint_test.go`；
+- `impl/atbus_connection_test.go`：✅ 已新增，后续继续补强 `atbus_connection` 的直接回归；
+- `impl/atbus_endpoint_test.go`：✅ 已新增，后续继续补强；
 - `impl/atbus_node_setup_test.go`；
-- `impl/atbus_node_relationship_test.go`；
+- `impl/atbus_node_relationship_test.go`：✅ 已新增，当前覆盖 `child_endpoint_opr` 对应的立即子节点增删与集合行为；
 - `impl/atbus_node_reg_test.go`；
-- `impl/atbus_node_msg_test.go`；
+- `impl/atbus_node_msg_test.go`：✅ 已新增，当前覆盖 `send_cmd_to_self`、未初始化发送返回码、`message_size_limit` 的无网络子集；
 - `error_code/libatbus_error_test.go` 与现有 `connection_context` /
   `message_handle` 测试做定向补强，而不是重写。
 

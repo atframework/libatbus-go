@@ -376,6 +376,7 @@ func TestCryptoSessionSetKey(t *testing.T) {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF,
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF,
 	}
@@ -501,6 +502,54 @@ func TestCryptoSessionEncryptDecryptCBCWithIV(t *testing.T) {
 
 	// Assert
 	assert.Equal(t, plaintext, decrypted)
+}
+
+func TestCryptoSessionEncryptDecryptChaCha20(t *testing.T) {
+	// Test: Verify pure ChaCha20 encrypt/decrypt roundtrip with nonce prefix.
+	// Arrange
+	session := NewCryptoSession()
+	key := make([]byte, 32)
+	iv := make([]byte, 12)
+	_, _ = rand.Read(key)
+	_, _ = rand.Read(iv)
+	require.NoError(t, session.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
+	plaintext := []byte("ChaCha20 roundtrip payload")
+
+	// Act
+	encrypted, err := session.Encrypt(plaintext)
+	require.NoError(t, err)
+
+	decrypted, err := session.Decrypt(encrypted)
+	require.NoError(t, err)
+
+	// Assert
+	assert.Equal(t, plaintext, decrypted)
+	assert.Len(t, encrypted, len(plaintext)+12)
+	assert.NotEqual(t, plaintext, encrypted[12:])
+}
+
+func TestCryptoSessionEncryptDecryptChaCha20WithIV(t *testing.T) {
+	// Test: Verify pure ChaCha20 encrypt/decrypt with caller-provided nonce.
+	// Arrange
+	session := NewCryptoSession()
+	key := make([]byte, 32)
+	iv := make([]byte, 12)
+	_, _ = rand.Read(key)
+	_, _ = rand.Read(iv)
+	require.NoError(t, session.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
+	plaintext := []byte("ChaCha20 with explicit nonce")
+
+	// Act
+	encrypted, err := session.EncryptWithIV(plaintext, iv)
+	require.NoError(t, err)
+
+	decrypted, err := session.DecryptWithIV(encrypted, iv)
+	require.NoError(t, err)
+
+	// Assert
+	assert.Equal(t, plaintext, decrypted)
+	assert.Len(t, encrypted, len(plaintext))
+	assert.NotEqual(t, plaintext, encrypted)
 }
 
 func TestCryptoSessionEncryptCBCWithIVInvalidSize(t *testing.T) {
@@ -661,8 +710,10 @@ func TestCryptoSessionXXTEAInvalidKeySize(t *testing.T) {
 func TestCryptoSessionXXTEACrossLanguageVector(t *testing.T) {
 	// Test: Verify XXTEA produces output consistent with the C++ implementation
 	// using the same known key and plaintext
-	key := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
+	key := []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+	}
 	plaintext := []byte{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48} // "ABCDEFGH"
 
 	// Arrange
@@ -892,6 +943,13 @@ func TestNegotiateCryptoAlgorithm(t *testing.T) {
 		remote := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE}
 		result := NegotiateCryptoAlgorithm(local, remote)
 		assert.Equal(t, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC, result)
+	})
+
+	t.Run("PureChaCha20", func(t *testing.T) {
+		local := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE}
+		remote := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE}
+		result := NegotiateCryptoAlgorithm(local, remote)
+		assert.Equal(t, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, result)
 	})
 
 	t.Run("NoCommon", func(t *testing.T) {
@@ -1173,6 +1231,54 @@ func TestConnectionContextPackUnpackMessageWithCBCIVInHeader(t *testing.T) {
 	blockSize := cryptoAlgorithmIVSize(protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC)
 	expectedCipherLen := ((len(originalBodyBytes) / blockSize) + 1) * blockSize
 	assert.Equal(t, expectedCipherLen, len(bodyBytes))
+
+	// Assert - unpack succeeds and data matches
+	unpacked := types.NewMessage()
+	errCode = ctx.UnpackMessage(unpacked, data, 65536)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
+	assert.Equal(t, testData, unpacked.GetBody().GetDataTransformReq().GetContent())
+}
+
+func TestConnectionContextPackUnpackMessageWithChaCha20IVInHeader(t *testing.T) {
+	// Test: Verify pure ChaCha20 uses header IV and does not prefix IV in body.
+	// Arrange
+	ctx := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519)
+	key := make([]byte, 32)
+	iv := make([]byte, 12)
+	_, _ = rand.Read(key)
+	_, _ = rand.Read(iv)
+	require.NoError(t, ctx.writeCrypto.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
+	require.NoError(t, ctx.readCrypto.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
+
+	testData := []byte("Hello, pure ChaCha20 encrypted data.")
+	msg := types.NewMessage()
+	msg.MutableHead().SourceBusId = 12345
+	msg.MutableHead().Sequence = 1
+	msg.MutableBody().MessageType = &protocol.MessageBody_DataTransformReq{
+		DataTransformReq: &protocol.ForwardData{
+			Content: testData,
+		},
+	}
+
+	// Act
+	packed, errCode := ctx.PackMessage(msg, 3, 65536)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
+	data := packed.UsedSpan()
+	headSize, headVintSize := buffer.ReadVint(data)
+	require.NotZero(t, headVintSize)
+
+	head := &protocol.MessageHead{}
+	err := proto.Unmarshal(data[headVintSize:headVintSize+int(headSize)], head)
+	require.NoError(t, err)
+
+	bodyBytes := data[headVintSize+int(headSize):]
+	originalBodyBytes, err := proto.Marshal(msg.GetBody())
+	require.NoError(t, err)
+
+	// Assert - header IV present and body length matches plaintext length (no padding)
+	require.NotNil(t, head.GetCrypto())
+	assert.Len(t, head.GetCrypto().GetIv(), 12)
+	assert.Equal(t, len(originalBodyBytes), len(bodyBytes))
 
 	// Assert - unpack succeeds and data matches
 	unpacked := types.NewMessage()

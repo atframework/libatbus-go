@@ -20,6 +20,7 @@ import (
 
 	lu "github.com/atframework/atframe-utils-go/lang_utility"
 	utils_log "github.com/atframework/atframe-utils-go/log"
+	utils_memory "github.com/atframework/atframe-utils-go/memory"
 
 	buffer "github.com/atframework/libatbus-go/buffer"
 	io_stream "github.com/atframework/libatbus-go/channel/io_stream"
@@ -218,6 +219,8 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
 	n.self.ClearPingTimer()
+	n.eventTimer.pingList = *utils_memory.NewLRUMap[*Endpoint, types.TimerDescPair[*Endpoint]](0)
+	n.eventTimer.connectingList = *utils_memory.NewLRUMap[string, types.TimerDescPair[*Connection]](0)
 
 	// Initialize node route collection
 	n.nodeRoute.endpointInstance = make(map[types.BusIdType]*Endpoint)
@@ -885,6 +888,10 @@ func (n *Node) SendDataWithOptions(tid types.BusIdType, t int32, data []byte, op
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
+	if n.GetState() == types.NodeState_Created {
+		return error_code.EN_ATBUS_ERR_NOT_INITED
+	}
+
 	if uint64(len(data)) > n.configure.MessageSize {
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
@@ -933,6 +940,10 @@ func (n *Node) SendCustomCommand(tid types.BusIdType, args [][]byte) error_code.
 func (n *Node) SendCustomCommandWithOptions(tid types.BusIdType, args [][]byte, options *types.NodeSendDataOptions) error_code.ErrorType {
 	if n == nil {
 		return error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	if n.GetState() == types.NodeState_Created {
+		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
 	sumLen := uint64(0)
@@ -1326,6 +1337,23 @@ func (n *Node) RemoveEndpoint(ep types.Endpoint) error_code.ErrorType {
 	} else {
 		return error_code.EN_ATBUS_ERR_ATNODE_NOT_FOUND
 	}
+}
+
+func (n *Node) RemoveEndpointByID(tid types.BusIdType) error_code.ErrorType {
+	if n == nil {
+		return error_code.EN_ATBUS_ERR_PARAMS
+	}
+
+	if tid == n.GetId() {
+		return error_code.EN_ATBUS_ERR_ATNODE_INVALID_ID
+	}
+
+	ep := n.GetEndpoint(tid)
+	if ep == nil {
+		return error_code.EN_ATBUS_ERR_ATNODE_NOT_FOUND
+	}
+
+	return n.RemoveEndpoint(ep)
 }
 
 func (n *Node) IsEndpointAvailable(tid types.BusIdType) bool {
