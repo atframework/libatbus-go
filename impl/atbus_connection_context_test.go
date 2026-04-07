@@ -1958,6 +1958,8 @@ func TestCrossLangAllEncryptedDataTransformReq(t *testing.T) {
 		{"AES-192-GCM", "enc_aes_192_gcm_data_transform_req.json", "enc_aes_192_gcm_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM},
 		{"AES-256-GCM", "enc_aes_256_gcm_data_transform_req.json", "enc_aes_256_gcm_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
 		{"ChaCha20-Poly1305", "enc_chacha20_poly1305_data_transform_req.json", "enc_chacha20_poly1305_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF},
+		{"ChaCha20", "enc_chacha20_data_transform_req.json", "enc_chacha20_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20},
+		{"XChaCha20-Poly1305", "enc_xchacha20_poly1305_data_transform_req.json", "enc_xchacha20_poly1305_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF},
 		{"XXTEA", "enc_xxtea_data_transform_req.json", "enc_xxtea_data_transform_req.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA},
 	}
 
@@ -2068,6 +2070,8 @@ func TestCrossLangAllEncryptedCustomCmd(t *testing.T) {
 		{"AES-192-GCM", "enc_aes_192_gcm_custom_cmd.json", "enc_aes_192_gcm_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM},
 		{"AES-256-GCM", "enc_aes_256_gcm_custom_cmd.json", "enc_aes_256_gcm_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
 		{"ChaCha20-Poly1305", "enc_chacha20_poly1305_custom_cmd.json", "enc_chacha20_poly1305_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF},
+		{"ChaCha20", "enc_chacha20_custom_cmd.json", "enc_chacha20_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20},
+		{"XChaCha20-Poly1305", "enc_xchacha20_poly1305_custom_cmd.json", "enc_xchacha20_poly1305_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF},
 		{"XXTEA", "enc_xxtea_custom_cmd.json", "enc_xxtea_custom_cmd.bytes", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA},
 	}
 

@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	channel_utility "github.com/atframework/libatbus-go/channel/utility"
@@ -187,7 +188,9 @@ func (e *Endpoint) AddConnection(conn types.Connection, forceData bool) bool {
 	}
 
 	// 已经成功连接可以不需要握手
-	// TODO: 注意这里新连接要控制时序，Handshaking检查之后才允许发起连接/响应连接回调流程
+	// C++ 注意这里新连接要控制时序，Handshaking检查之后才允许发起连接/响应连接回调流程
+	// C++ 目前走libuv流程connection和endpoint管理都是单线程的，不会有时序问题
+	// Go 中通过 e.mu 互斥锁保证同样的时序安全性：binding 设置和状态迁移在同一个临界区内完成
 	setConnectionBinding(conn, e)
 	if conn.GetStatus() == types.ConnectionState_Handshaking {
 		setConnectionStatus(conn, types.ConnectionState_Connected)
@@ -530,8 +533,7 @@ func (e *Endpoint) AddStatisticFault() uint64 {
 		return 0
 	}
 
-	e.stat.FaultCount++
-	return e.stat.FaultCount
+	return atomic.AddUint64(&e.stat.FaultCount, 1)
 }
 
 func (e *Endpoint) ClearStatisticFault() {
@@ -539,7 +541,7 @@ func (e *Endpoint) ClearStatisticFault() {
 		return
 	}
 
-	e.stat.FaultCount = 0
+	atomic.StoreUint64(&e.stat.FaultCount, 0)
 }
 
 func (e *Endpoint) SetStatisticUnfinishedPing(p uint64) {

@@ -1,0 +1,41 @@
+{
+  "name": "enc_chacha20_custom_cmd",
+  "description": "Custom command request with pure chacha20 encryption",
+  "protocol_version": 3,
+  "body_type": "custom_command_req",
+  "body_type_case": 1,
+  "compression_algorithm": "",
+  "compression_algorithm_type": 0,
+  "compression_original_size": 0,
+  "crypto_algorithm": "chacha20",
+  "crypto_algorithm_type": 31,
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "key_size": 32,
+  "iv_hex": "b0b1b2b3b4b5b6b7b8b9babb",
+  "iv_size": 12,
+  "aad_hex": "",
+  "aad_size": 0,
+  "packed_size": 60,
+  "packed_hex": "1608033210081f120cb0b1b2b3b4b5b6b7b8b9babb4825a2feb5c43899ee28a62aec2e4b148423ee72ff8d8f1b07b3f064ee6a2cd197aad173009599",
+  "expected": {
+    "from": 12379813738877118345,
+    "to": 0,
+    "content": "",
+    "content_hex": "",
+    "content_size": 0,
+    "content_pattern": "",
+    "flags": 1,
+    "commands": [
+      "cmd1",
+      "arg1",
+      "arg2"
+    ],
+    "time_point": 0,
+    "bus_id": 0,
+    "pid": 0,
+    "hostname": "",
+    "channels": null,
+    "node_bus_ids": null,
+    "address": ""
+  }
+}

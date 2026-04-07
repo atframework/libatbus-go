@@ -1,6 +1,8 @@
 package libatbus_impl
 
 import (
+	"sync/atomic"
+
 	io_stream "github.com/atframework/libatbus-go/channel/io_stream"
 	channel_utility "github.com/atframework/libatbus-go/channel/utility"
 	error_code "github.com/atframework/libatbus-go/error_code"
@@ -279,8 +281,7 @@ func (c *Connection) AddStatisticFault() uint64 {
 		return 0
 	}
 
-	c.statistic.FaultCount++
-	return c.statistic.FaultCount
+	return atomic.AddUint64(&c.statistic.FaultCount, 1)
 }
 
 func (c *Connection) ClearStatisticFault() {
@@ -288,7 +289,7 @@ func (c *Connection) ClearStatisticFault() {
 		return
 	}
 
-	c.statistic.FaultCount = 0
+	atomic.StoreUint64(&c.statistic.FaultCount, 0)
 }
 
 func (c *Connection) GetAddress() types.ChannelAddress {
