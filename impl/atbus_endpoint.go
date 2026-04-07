@@ -3,6 +3,7 @@ package libatbus_impl
 import (
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	channel_utility "github.com/atframework/libatbus-go/channel/utility"
@@ -29,6 +30,9 @@ type Endpoint struct {
 
 	flags uint32
 
+	// mu protects ctrlConn, dataConn, and flags against concurrent access
+	// from IO goroutines (disconnect callbacks) and the main loop.
+	mu       sync.Mutex
 	ctrlConn types.Connection
 	dataConn []types.Connection
 
@@ -73,36 +77,44 @@ func (e *Endpoint) Reset() {
 		return
 	}
 
-	if e.GetFlag(types.EndpointFlag_Resetting) {
+	e.mu.Lock()
+	if e.flags&uint32(types.EndpointFlag_Resetting) != 0 {
+		e.mu.Unlock()
 		return
 	}
-	e.setFlag(types.EndpointFlag_Resetting, true)
+	e.flags |= uint32(types.EndpointFlag_Resetting)
 
-	if e.ctrlConn != nil {
-		setConnectionBinding(e.ctrlConn, nil)
-		e.ctrlConn.Reset()
-		e.ctrlConn = nil
-	}
-
-	if len(e.dataConn) > 0 {
-		for _, conn := range e.dataConn {
-			if conn == nil {
-				continue
-			}
-			setConnectionBinding(conn, nil)
-			conn.Reset()
-		}
-		e.dataConn = nil
-	}
-
+	// Snapshot and clear connections under the lock, then reset them
+	// outside the lock to avoid deadlock with IO goroutine callbacks.
+	ctrl := e.ctrlConn
+	e.ctrlConn = nil
+	data := e.dataConn
+	e.dataConn = nil
 	e.listenAddress = nil
+	e.mu.Unlock()
+
+	if ctrl != nil {
+		setConnectionBinding(ctrl, nil)
+		ctrl.Reset()
+	}
+
+	for _, conn := range data {
+		if conn == nil {
+			continue
+		}
+		setConnectionBinding(conn, nil)
+		conn.Reset()
+	}
+
 	e.ClearPingTimer()
 
 	if e.owner != nil {
 		e.owner.AddEndpointGcList(e)
 	}
 
+	e.mu.Lock()
 	e.flags = 0
+	e.mu.Unlock()
 }
 
 func (e *Endpoint) GetId() types.BusIdType {
@@ -148,7 +160,10 @@ func (e *Endpoint) AddConnection(conn types.Connection, forceData bool) bool {
 		return false
 	}
 
-	if e.GetFlag(types.EndpointFlag_Resetting) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.flags&uint32(types.EndpointFlag_Resetting) != 0 {
 		return false
 	}
 
@@ -166,7 +181,7 @@ func (e *Endpoint) AddConnection(conn types.Connection, forceData bool) bool {
 
 	if forceData || e.ctrlConn != nil {
 		e.dataConn = append(e.dataConn, conn)
-		e.setFlag(types.EndpointFlag_ConnectionSorted, false)
+		e.flags &^= uint32(types.EndpointFlag_ConnectionSorted)
 	} else {
 		e.ctrlConn = conn
 	}
@@ -186,20 +201,26 @@ func (e *Endpoint) RemoveConnection(conn types.Connection) bool {
 		return false
 	}
 
+	e.mu.Lock()
+
 	if conn.GetBinding() != e {
+		e.mu.Unlock()
 		return false
 	}
 
-	if e.GetFlag(types.EndpointFlag_Resetting) {
+	if e.flags&uint32(types.EndpointFlag_Resetting) != 0 {
+		e.mu.Unlock()
 		setConnectionBinding(conn, nil)
 		return true
 	}
 
 	if conn == e.ctrlConn {
+		e.mu.Unlock()
 		e.Reset()
 		return true
 	}
 
+	needReset := false
 	for idx, cur := range e.dataConn {
 		if cur != conn {
 			continue
@@ -209,12 +230,17 @@ func (e *Endpoint) RemoveConnection(conn types.Connection) bool {
 		e.dataConn = append(e.dataConn[:idx], e.dataConn[idx+1:]...)
 
 		if len(e.dataConn) == 0 {
-			e.Reset()
+			needReset = true
 		}
 
+		e.mu.Unlock()
+		if needReset {
+			e.Reset()
+		}
 		return true
 	}
 
+	e.mu.Unlock()
 	return false
 }
 
@@ -403,8 +429,12 @@ func (e *Endpoint) GetCtrlConnection(peer types.Endpoint) types.Connection {
 		return nil
 	}
 
-	if peerImpl.ctrlConn != nil && peerImpl.ctrlConn.GetStatus() == types.ConnectionState_Connected {
-		return peerImpl.ctrlConn
+	peerImpl.mu.Lock()
+	ctrl := peerImpl.ctrlConn
+	peerImpl.mu.Unlock()
+
+	if ctrl != nil && ctrl.GetStatus() == types.ConnectionState_Connected {
+		return ctrl
 	}
 
 	return nil

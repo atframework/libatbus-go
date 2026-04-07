@@ -46,9 +46,17 @@
 | `impl/atbus_connection_context_test.go` | 握手、压缩、加密、部分跨语言向量 |
 | `message_handle/atbus_message_handler_test.go` | body name、AccessData、dispatch 相关 |
 
-当前仍需继续补齐的专项测试文件：
+已新增的专项测试文件（自初版计划后新增）：
 
-- `impl/atbus_node_setup_test.go`
+| Go 测试文件 | 当前作用 |
+| ------------- | ---------- |
+| `impl/atbus_node_regression_test.go` | P0 Bug 回归（17 项测试） |
+| `impl/atbus_node_setup_test.go` | 节点配置 / 算法 setup（5 项测试） |
+| `impl/atbus_node_relationship_test.go` | 节点关系与端点增删生命周期（3 项测试） |
+| `impl/atbus_node_reg_test.go` | 注册 / 拓扑 / 超时（19 项测试） |
+| `impl/atbus_node_msg_test.go` | 消息收发 / 转发 / loopback（15 项测试） |
+| `impl/atbus_endpoint_test.go` | 端点基本行为（3 项测试） |
+| `impl/atbus_connection_test.go` | 连接生命周期（7 项测试） |
 
 ---
 
@@ -61,15 +69,15 @@
 | `channel_io_stream_tcp_test.cpp` | 8 | 已覆盖 | 维持现状 |
 | `channel_io_stream_unix_test.cpp` | 5 | 已覆盖（平台相关） | Windows 上按能力等价或 `t.Skip()` |
 | `atbus_topology_test.cpp` | 9 | 已覆盖 | 维持现状 |
-| `atbus_endpoint_test.cpp` | 5 | 缺少 dedicated suite | 新增 `impl/atbus_endpoint_test.go`，地址类场景优先复用 `channel/utility` |
+| `atbus_endpoint_test.cpp` | 5 | ✅ 已新增 dedicated suite | `impl/atbus_endpoint_test.go` (3 项测试) |
 | `atbus_connection_context_test.cpp` | 37 | 大部分已覆盖 | 仅补缺口，不重复已有矩阵 |
 | `atbus_connection_context_crosslang_generator.cpp` | 10 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
 | `atbus_access_data_crosslang_generator.cpp` | 8 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
 | `atbus_message_handler_test.cpp` | 19 | 基本覆盖 | 修完 P0 Bug 后保留并补回归 |
-| `atbus_node_setup_test.cpp` | 3 | 缺失 | 新增 `impl/atbus_node_setup_test.go`；`override_listen_path` / 名称解析相关 case 仍需评估 Go 等价覆盖点 |
-| `atbus_node_relationship_test.cpp` | 3 | 部分覆盖 | `impl/atbus_node_relationship_test.go` 已覆盖 `copy_conf`、`child_endpoint_opr`；`basic_test` 在 C++ 中被 `#if 0` 禁用，暂不作为必须通过项 |
-| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | 部分覆盖 | `impl/atbus_node_reg_test.go` 已覆盖 `set_hostname`；其余 18 个非 mem/shm case 继续补齐 |
-| `atbus_node_msg_test.cpp` | 23 | 部分覆盖 | `impl/atbus_node_msg_test.go` 已覆盖 `custom_cmd`、`custom_cmd_by_temp_node`、`send_cmd_to_self`、`send_msg_to_self_and_need_rsp` 以及若干 Go 侧回归子场景；其余 case 继续补齐 |
+| `atbus_node_setup_test.cpp` | 3 | ✅ 已新增 | `impl/atbus_node_setup_test.go` (5 项测试，覆盖 override_listen_path / crypto / compression / key_exchange / reload_crypto) |
+| `atbus_node_relationship_test.cpp` | 3 | ✅ 已覆盖 | `impl/atbus_node_relationship_test.go` (3 项测试：copy_conf、child_endpoint_opr、endpoint_events) |
+| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | ✅ 已大部分覆盖 | `impl/atbus_node_reg_test.go` (19 项测试，覆盖 set_hostname / reset_and_send / timeout / message_size_limit / reg_failed / reg_success / destruct / conflict / reconnect / topology_changes 等) |
+| `atbus_node_msg_test.cpp` | 23 | ✅ 已大部分覆盖 | `impl/atbus_node_msg_test.go` (15 项测试，覆盖 custom_cmd / send_cmd_to_self / send_msg_to_self_and_need_rsp / send_data / upstream_downstream / ping_pong / transfer / loopback / crypto 等) |
 
 补充说明：
 

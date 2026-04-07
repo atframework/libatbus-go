@@ -684,36 +684,52 @@ func (n *Node) processPingTimers(now time.Time) {
 	}
 }
 
-// executeGC executes garbage collection for pending endpoints and connections
+// executeGC executes garbage collection for pending endpoints and connections.
+// Matches C++ node::proc / node::poll GC sections:
+//   - For each pending endpoint, if it is no longer available, reset and
+//     remove it from the routing table (which also handles upstream state
+//     transitions such as Running → LostUpstream).
+//   - Connection GC simply clears the pending list (connections are cleaned
+//     up when their owning endpoint is reset).
 func (n *Node) executeGC() {
 	// GC endpoints
 	if !n.CheckFlag(types.NodeFlag_InGcEndpoints) {
 		var fgGc nodeFlagGuard
 		fgGc.openFlag(n, types.NodeFlag_InGcEndpoints)
 
+		// Swap the current list into a local slice so that RemoveEndpoint /
+		// Reset calls that re-add entries do not cause an infinite loop.
+		checked := make([]types.Endpoint, 0, n.eventTimer.pendingEndpointGcList.Len())
 		for n.eventTimer.pendingEndpointGcList.Len() > 0 {
 			front := n.eventTimer.pendingEndpointGcList.Front()
 			if front == nil {
 				break
 			}
+			if ep, ok := front.Value.(types.Endpoint); ok && !lu.IsNil(ep) {
+				checked = append(checked, ep)
+			}
 			n.eventTimer.pendingEndpointGcList.Remove(front)
 		}
+
+		for _, ep := range checked {
+			if !ep.IsAvailable() {
+				n.LogInfo(ep, nil, "endpoint gc and remove")
+				n.RemoveEndpoint(ep)
+			}
+		}
+
+		// Clear any entries that were re-added during the loop above.
+		n.eventTimer.pendingEndpointGcList.Init()
 
 		fgGc.closeFlag()
 	}
 
-	// GC connections
+	// GC connections — just clear the pending list (C++ does the same).
 	if !n.CheckFlag(types.NodeFlag_InGcConnections) {
 		var fgGc nodeFlagGuard
 		fgGc.openFlag(n, types.NodeFlag_InGcConnections)
 
-		for n.eventTimer.pendingConnectionGcList.Len() > 0 {
-			front := n.eventTimer.pendingConnectionGcList.Front()
-			if front == nil {
-				break
-			}
-			n.eventTimer.pendingConnectionGcList.Remove(front)
-		}
+		n.eventTimer.pendingConnectionGcList.Init()
 	}
 }
 
@@ -1383,9 +1399,10 @@ func (n *Node) AddEndpoint(ep types.Endpoint) error_code.ErrorType {
 	}
 
 	if !isUpdateUpstream && 0 != n.GetId() && n.topologyRegistry != nil {
-		peer := n.topologyRegistry.GetPeerInstance(ep.GetId())
-		if peer != nil && peer.GetUpstream() != nil {
-			upStreamId := peer.GetUpstream().GetBusId()
+		// C++ uses get_peer(get_id()) — query the SELF peer to check if ep is our upstream.
+		selfPeer := n.topologyRegistry.GetPeerInstance(n.GetId())
+		if selfPeer != nil && selfPeer.GetUpstream() != nil {
+			upStreamId := selfPeer.GetUpstream().GetBusId()
 			if upStreamId == ep.GetId() {
 				isUpdateUpstream = true
 			}

@@ -1207,11 +1207,11 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 			head.GetSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
 			n.LogError(getConnectionBinding(conn), conn, int(ret), ret, fmt.Sprintf("send unsupported version %d register response failed", head.GetVersion()))
-			if !connIsNil {
-				conn.Reset()
-			}
-			return ret
 		}
+		if !connIsNil {
+			conn.Reset()
+		}
+		return error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION
 	}
 
 	responseCode, ep := func() (error_code.ErrorType, types.Endpoint) {
