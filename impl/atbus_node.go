@@ -14,6 +14,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -44,6 +45,7 @@ type nodeEventTimer struct {
 	tick time.Time
 
 	upstreamOpTimepoint     time.Time
+	pingListMu              sync.Mutex
 	pingList                types.TimerDescType[*Endpoint, *Endpoint]
 	connectingList          types.TimerDescType[string, *Connection]
 	pendingEndpointGcList   list.List
@@ -499,12 +501,14 @@ func (n *Node) Reset() error_code.ErrorType {
 	n.eventTimer.pendingEndpointGcList.Init()
 	n.eventTimer.pendingConnectionGcList.Init()
 
+	n.eventTimer.pingListMu.Lock()
 	for {
 		_, _, exists := n.eventTimer.pingList.PopFront()
 		if !exists {
 			break
 		}
 	}
+	n.eventTimer.pingListMu.Unlock()
 
 	// Close IO stream channel
 	if n.ioStreamChannel != nil {
@@ -662,22 +666,27 @@ func (n *Node) processUpstreamOperations(now time.Time) {
 // processPingTimers handles ping timer operations
 func (n *Node) processPingTimers(now time.Time) {
 	for {
+		n.eventTimer.pingListMu.Lock()
 		_, pair, exists := n.eventTimer.pingList.Front()
 		if !exists {
+			n.eventTimer.pingListMu.Unlock()
 			break
 		}
 
 		if pair.Value == nil {
 			n.eventTimer.pingList.PopFront()
+			n.eventTimer.pingListMu.Unlock()
 			continue
 		}
 
 		if !pair.Timeout.Before(now) {
+			n.eventTimer.pingListMu.Unlock()
 			break
 		}
 
 		ep := pair.Value
 		n.eventTimer.pingList.PopFront()
+		n.eventTimer.pingListMu.Unlock()
 
 		// Send ping
 		n.pingEndpoint(ep)
@@ -2177,10 +2186,12 @@ func (n *Node) addPingTimer(ep *Endpoint, nextPingTime time.Time) bool {
 		return false
 	}
 
+	n.eventTimer.pingListMu.Lock()
 	n.eventTimer.pingList.Put(ep, types.TimerDescPair[*Endpoint]{
 		Timeout: nextPingTime,
 		Value:   ep,
 	})
+	n.eventTimer.pingListMu.Unlock()
 	return true
 }
 
@@ -2190,7 +2201,9 @@ func (n *Node) removePingTimer(ep *Endpoint) {
 		return
 	}
 
+	n.eventTimer.pingListMu.Lock()
 	n.eventTimer.pingList.Delete(ep)
+	n.eventTimer.pingListMu.Unlock()
 }
 
 func (n *Node) AddConnectionGcList(conn types.Connection) {
