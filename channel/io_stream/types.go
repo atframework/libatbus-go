@@ -3,6 +3,7 @@ package libatbus_channel_iostream
 import (
 	"context"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -248,6 +249,9 @@ type IoStreamChannel struct {
 
 	// listeners maps address string to listener
 	listeners map[string]net.Listener
+
+	// addressLocks tracks flock files for unix socket listen paths
+	addressLocks map[string]*os.File
 
 	// connections maps connection to IoStreamConnection
 	connections map[net.Conn]*IoStreamConnection

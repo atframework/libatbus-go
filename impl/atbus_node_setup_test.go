@@ -8,6 +8,7 @@
 package libatbus_impl
 
 import (
+	"os"
 	"runtime"
 	"testing"
 
@@ -30,8 +31,10 @@ func TestNodeSetupParity_OverrideListenPath(t *testing.T) {
 
 	sockPath := "/tmp/atbus-go-unit-test-overwrite-unix.sock"
 	t.Cleanup(func() {
-		// Best-effort cleanup of leftover lock files.
+		// Best-effort cleanup of leftover lock and socket files.
 		// The node Reset/Close should handle this, but be defensive.
+		os.Remove(sockPath)
+		os.Remove(sockPath + ".lock")
 	})
 
 	// -- node1: overwrite_listen_path = false, listen on sockPath -- should succeed

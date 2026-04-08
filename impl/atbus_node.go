@@ -2485,6 +2485,8 @@ func (n *Node) GetIoStreamConfigure() *types.IoStreamConfigure {
 			MaxReadNetEgainCount:             256,
 			MaxReadCheckBlockSizeFailedCount: 10,
 			MaxReadCheckHashFailedCount:      10,
+
+			OverwriteListenPath: n.configure.OverwriteListenPath,
 		}
 	}
 

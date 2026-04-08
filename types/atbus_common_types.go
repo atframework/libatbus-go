@@ -243,6 +243,8 @@ type IoStreamConfigure struct {
 	MaxReadNetEgainCount             uint64
 	MaxReadCheckBlockSizeFailedCount uint64
 	MaxReadCheckHashFailedCount      uint64
+
+	OverwriteListenPath bool // 是否覆盖已存在的 listen path(unix/pipe socket)
 }
 
 // SetDefaultIoStreamConfigure sets the default values for IoStreamConfigure.

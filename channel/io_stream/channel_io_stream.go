@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -41,10 +43,11 @@ func NewIoStreamChannel(ctx context.Context, conf *IoStreamConfigure) *IoStreamC
 	channelCtx, cancel := context.WithCancel(ctx)
 
 	channel := &IoStreamChannel{
-		ctx:         channelCtx,
-		cancel:      cancel,
-		listeners:   make(map[string]net.Listener),
-		connections: make(map[net.Conn]*IoStreamConnection),
+		ctx:          channelCtx,
+		cancel:       cancel,
+		listeners:    make(map[string]net.Listener),
+		addressLocks: make(map[string]*os.File),
+		connections:  make(map[net.Conn]*IoStreamConnection),
 	}
 
 	if conf != nil {
@@ -79,8 +82,52 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
+	// For unix/pipe sockets, handle path locking and cleanup
+	if network == "unix" {
+		// Resolve to absolute path for consistency
+		absPath, err := filepath.Abs(address)
+		if err == nil {
+			address = absPath
+		}
+
+		if !c.conf.OverwriteListenPath {
+			// Acquire file lock to prevent concurrent listen
+			lockPath := address + ".lock"
+			lockFile, lockOk := tryFlockFile(lockPath)
+			if !lockOk {
+				return error_code.EN_ATBUS_ERR_PIPE_LOCK_PATH_FAILED
+			}
+			if lockFile != nil {
+				c.mu.Lock()
+				c.addressLocks[addr] = lockFile
+				c.mu.Unlock()
+			}
+		}
+
+		// Remove existing socket file if present
+		if _, statErr := os.Stat(address); statErr == nil {
+			if removeErr := os.Remove(address); removeErr != nil {
+				// Unlock if we locked
+				c.mu.Lock()
+				if lockFile, exists := c.addressLocks[addr]; exists {
+					unlockFlockFile(lockFile)
+					delete(c.addressLocks, addr)
+				}
+				c.mu.Unlock()
+				return error_code.EN_ATBUS_ERR_PIPE_REMOVE_FAILED
+			}
+		}
+	}
+
 	listener, err := net.Listen(network, address)
 	if err != nil {
+		// Unlock if we locked
+		c.mu.Lock()
+		if lockFile, exists := c.addressLocks[addr]; exists {
+			unlockFlockFile(lockFile)
+			delete(c.addressLocks, addr)
+		}
+		c.mu.Unlock()
 		return error_code.EN_ATBUS_ERR_SOCK_BIND_FAILED
 	}
 
@@ -218,6 +265,11 @@ func (c *IoStreamChannel) Close() error_code.ErrorType {
 	for addr, listener := range c.listeners {
 		listener.Close()
 		delete(c.listeners, addr)
+	}
+	// Release all address locks
+	for addr, lockFile := range c.addressLocks {
+		unlockFlockFile(lockFile)
+		delete(c.addressLocks, addr)
 	}
 	c.mu.Unlock()
 
