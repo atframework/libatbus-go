@@ -101,7 +101,7 @@ func TestCryptoAlgorithmTypeIVSize(t *testing.T) {
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM, 12},
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM, 12},
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM, 12},
-		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, 12},
+		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, 16},
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF, 12},
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF, 24},
 		{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE(999), 0},
@@ -509,7 +509,7 @@ func TestCryptoSessionEncryptDecryptChaCha20(t *testing.T) {
 	// Arrange
 	session := NewCryptoSession()
 	key := make([]byte, 32)
-	iv := make([]byte, 12)
+	iv := make([]byte, 16)
 	_, _ = rand.Read(key)
 	_, _ = rand.Read(iv)
 	require.NoError(t, session.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
@@ -524,8 +524,8 @@ func TestCryptoSessionEncryptDecryptChaCha20(t *testing.T) {
 
 	// Assert
 	assert.Equal(t, plaintext, decrypted)
-	assert.Len(t, encrypted, len(plaintext)+12)
-	assert.NotEqual(t, plaintext, encrypted[12:])
+	assert.Len(t, encrypted, len(plaintext)+16)
+	assert.NotEqual(t, plaintext, encrypted[16:])
 }
 
 func TestCryptoSessionEncryptDecryptChaCha20WithIV(t *testing.T) {
@@ -533,7 +533,7 @@ func TestCryptoSessionEncryptDecryptChaCha20WithIV(t *testing.T) {
 	// Arrange
 	session := NewCryptoSession()
 	key := make([]byte, 32)
-	iv := make([]byte, 12)
+	iv := make([]byte, 16)
 	_, _ = rand.Read(key)
 	_, _ = rand.Read(iv)
 	require.NoError(t, session.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
@@ -1244,7 +1244,7 @@ func TestConnectionContextPackUnpackMessageWithChaCha20IVInHeader(t *testing.T) 
 	// Arrange
 	ctx := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519)
 	key := make([]byte, 32)
-	iv := make([]byte, 12)
+	iv := make([]byte, 16)
 	_, _ = rand.Read(key)
 	_, _ = rand.Read(iv)
 	require.NoError(t, ctx.writeCrypto.SetKey(key, iv, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20))
@@ -1277,7 +1277,7 @@ func TestConnectionContextPackUnpackMessageWithChaCha20IVInHeader(t *testing.T) 
 
 	// Assert - header IV present and body length matches plaintext length (no padding)
 	require.NotNil(t, head.GetCrypto())
-	assert.Len(t, head.GetCrypto().GetIv(), 12)
+	assert.Len(t, head.GetCrypto().GetIv(), 16)
 	assert.Equal(t, len(originalBodyBytes), len(bodyBytes))
 
 	// Assert - unpack succeeds and data matches

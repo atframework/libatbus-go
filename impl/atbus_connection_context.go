@@ -18,8 +18,8 @@ import (
 	"time"
 
 	compression "github.com/atframework/atframe-utils-go/algorithm/compression"
+	"github.com/atframework/atframe-utils-go/algorithm/crypto/chacha20"
 	"github.com/atframework/atframe-utils-go/algorithm/crypto/xxtea"
-	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/proto"
@@ -111,7 +111,7 @@ func cryptoAlgorithmIVSize(c protocol.ATBUS_CRYPTO_ALGORITHM_TYPE) int {
 		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM:
 		return 12 // standard GCM nonce size
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
-		return 12
+		return chacha20.IVSize // 16 bytes: 8 counter + 8 nonce (original DJB variant, matches C++ libsodium)
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF:
 		return chacha20poly1305.NonceSize // 12 bytes
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF:
@@ -491,8 +491,8 @@ func (cs *CryptoSession) initCipher() error {
 		cs.aeadCipher = aead
 
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20:
-		if _, err := chacha20.NewUnauthenticatedCipher(cs.Key, cs.IV); err != nil {
-			return fmt.Errorf("%w: %v", ErrCryptoAlgorithmNotSupported, err)
+		if len(cs.Key) != chacha20.KeySize {
+			return fmt.Errorf("%w: invalid key size %d for ChaCha20", ErrCryptoAlgorithmNotSupported, len(cs.Key))
 		}
 
 	case protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF:
@@ -739,17 +739,14 @@ func (cs *CryptoSession) encryptChaCha20(plaintext []byte) ([]byte, error) {
 // encryptChaCha20WithIV encrypts using the pure ChaCha20 stream cipher and a caller-provided nonce.
 // Caller must hold the lock.
 func (cs *CryptoSession) encryptChaCha20WithIV(plaintext []byte, iv []byte) ([]byte, error) {
-	if len(iv) != chacha20.NonceSize {
-		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.NonceSize, len(iv))
-	}
-
-	stream, err := chacha20.NewUnauthenticatedCipher(cs.Key, iv)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCryptoEncryptFailed, err)
+	if len(iv) != chacha20.IVSize {
+		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.IVSize, len(iv))
 	}
 
 	ciphertext := make([]byte, len(plaintext))
-	stream.XORKeyStream(ciphertext, plaintext)
+	if err := chacha20.XORKeyStream(ciphertext, plaintext, cs.Key, iv); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoEncryptFailed, err)
+	}
 	return ciphertext, nil
 }
 
@@ -1033,17 +1030,14 @@ func (cs *CryptoSession) decryptChaCha20(ciphertext []byte) ([]byte, error) {
 // decryptChaCha20WithIV decrypts using the pure ChaCha20 stream cipher and a caller-provided nonce.
 // Caller must hold the lock.
 func (cs *CryptoSession) decryptChaCha20WithIV(ciphertext []byte, iv []byte) ([]byte, error) {
-	if len(iv) != chacha20.NonceSize {
-		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.NonceSize, len(iv))
-	}
-
-	stream, err := chacha20.NewUnauthenticatedCipher(cs.Key, iv)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCryptoDecryptFailed, err)
+	if len(iv) != chacha20.IVSize {
+		return nil, fmt.Errorf("%w: expected %d, got %d", ErrCryptoInvalidIVSize, chacha20.IVSize, len(iv))
 	}
 
 	plaintext := make([]byte, len(ciphertext))
-	stream.XORKeyStream(plaintext, ciphertext)
+	if err := chacha20.XORKeyStream(plaintext, ciphertext, cs.Key, iv); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCryptoDecryptFailed, err)
+	}
 	return plaintext, nil
 }
 
