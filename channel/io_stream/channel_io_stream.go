@@ -65,8 +65,8 @@ func NewIoStreamChannel(ctx context.Context, conf *IoStreamConfigure) *IoStreamC
 //   - ipv6://host:port - IPv4/IPv6 TCP
 //   - atcp://host:port - IPv4/IPv6 TCP
 //   - dns://host:port - DNS resolved TCP
-//   - unix://path - Unix domain socket
-//   - pipe://path - Named pipe (same as unix)
+//   - pipe://path - Pipe socket (canonical name, uses Unix domain socket on Unix, AF_UNIX on Windows)
+//   - unix://path - Unix domain socket (backward-compatible alias for pipe://)
 func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 	if c.closed.Load() {
 		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
@@ -83,7 +83,7 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 	}
 
 	// For unix/pipe sockets, handle path locking and cleanup
-	if network == "unix" {
+	if network == "pipe" {
 		// Resolve to absolute path for consistency
 		absPath, err := filepath.Abs(address)
 		if err == nil {
@@ -119,7 +119,13 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 		}
 	}
 
-	listener, err := net.Listen(network, address)
+	// Translate "pipe" to Go-compatible network type for this platform
+	goNetwork := network
+	if network == "pipe" {
+		goNetwork = pipeGoNetworkType()
+	}
+
+	listener, err := net.Listen(goNetwork, address)
 	if err != nil {
 		// Unlock if we locked
 		c.mu.Lock()
@@ -164,7 +170,13 @@ func (c *IoStreamChannel) Connect(addr string) (types.IoStreamConnection, error_
 		KeepAlive: c.conf.Keepalive,
 	}
 
-	conn, err := dialer.DialContext(c.ctx, network, address)
+	// Translate "pipe" to Go-compatible network type for this platform
+	goNetwork := network
+	if network == "pipe" {
+		goNetwork = pipeGoNetworkType()
+	}
+
+	conn, err := dialer.DialContext(c.ctx, goNetwork, address)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
@@ -330,7 +342,8 @@ func (c *IoStreamChannel) acceptLoop(listener net.Listener, listenAddr *channel_
 		// Determine the scheme based on the listener address
 		switch listenAddr.Scheme {
 		case "unix", "pipe":
-			parsedAddr = channel_utility.MakeAddressFromComponents(listenAddr.Scheme, remoteAddr, 0)
+			// Use platform-specific scheme: "pipe" on Windows, "unix" on Unix (matches C++ behavior)
+			parsedAddr = channel_utility.MakeAddressFromComponents(pipeAcceptScheme(), remoteAddr, 0)
 		default:
 			// For TCP connections, parse the remote address
 			host, port := parseHostPort(remoteAddr)
@@ -899,7 +912,7 @@ func (c *IoStreamChannel) resolveAddress(addr *channel_utility.ChannelAddress) (
 		// DNS uses regular TCP, Go's net package handles DNS resolution
 		return "tcp", fmt.Sprintf("%s:%d", addr.Host, addr.Port)
 	case "unix", "pipe":
-		return "unix", addr.Host
+		return "pipe", addr.Host
 	default:
 		return "", ""
 	}

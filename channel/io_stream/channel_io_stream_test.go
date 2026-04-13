@@ -1021,10 +1021,9 @@ func TestIoStreamUnixConnectFailed(t *testing.T) {
 
 // TestIoStreamPipeBasic verifies basic pipe listen, connect, and data send/receive.
 func TestIoStreamPipeBasic(t *testing.T) {
-	// "pipe://" is an alias for unix domain sockets in this implementation.
-	// On Windows, Go's net package supports unix domain sockets (Windows 10 1803+)
-	// but not Windows named pipes (\\.\\pipe\\...).
-	// Use a temp file path for all platforms.
+	// "pipe://" is the canonical scheme name. It uses Unix domain sockets on Unix
+	// and AF_UNIX sockets on Windows (Windows 10 1803+).
+	// "unix://" is kept for backward compatibility.
 	sockPath := getUnixSocketPath(t)
 	defer os.Remove(sockPath)
 	listenAddr := "pipe://" + sockPath

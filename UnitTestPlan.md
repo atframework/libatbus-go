@@ -43,7 +43,7 @@
 | `channel/utility/channel_utility_test.go` | 地址解析、schema、优先级辅助 |
 | `error_code/libatbus_error_test.go` | 错误码字符串映射（部分） |
 | `impl/atbus_topology_test.go` | topology registry / relation |
-| `impl/atbus_connection_context_test.go` | 握手、压缩、加密、部分跨语言向量 |
+| `impl/atbus_connection_context_test.go` | 握手、压缩、加密、跨语言向量（含纯 ChaCha20） |
 | `message_handle/atbus_message_handler_test.go` | body name、AccessData、dispatch 相关 |
 
 已新增的专项测试文件（自初版计划后新增）：
@@ -55,6 +55,7 @@
 | `impl/atbus_node_relationship_test.go` | 节点关系与端点增删生命周期（3 项测试） |
 | `impl/atbus_node_reg_test.go` | 注册 / 拓扑 / 超时（19 项测试） |
 | `impl/atbus_node_msg_test.go` | 消息收发 / 转发 / loopback（15 项测试） |
+| `impl/atbus_node_msg_extended_test.go` | 多级拓扑路由 / 转发失败 / 加密集成（11 项测试） |
 | `impl/atbus_endpoint_test.go` | 端点基本行为（3 项测试） |
 | `impl/atbus_connection_test.go` | 连接生命周期（7 项测试） |
 
@@ -70,152 +71,72 @@
 | `channel_io_stream_unix_test.cpp` | 5 | 已覆盖（平台相关） | Windows 上按能力等价或 `t.Skip()` |
 | `atbus_topology_test.cpp` | 9 | 已覆盖 | 维持现状 |
 | `atbus_endpoint_test.cpp` | 5 | ✅ 已新增 dedicated suite | `impl/atbus_endpoint_test.go` (3 项测试) |
-| `atbus_connection_context_test.cpp` | 37 | 大部分已覆盖 | 仅补缺口，不重复已有矩阵 |
-| `atbus_connection_context_crosslang_generator.cpp` | 10 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
-| `atbus_access_data_crosslang_generator.cpp` | 8 | 已有部分覆盖 | 视可维护性决定是否拆出 dedicated fixture loader |
-| `atbus_message_handler_test.cpp` | 19 | 基本覆盖 | 修完 P0 Bug 后保留并补回归 |
+| `atbus_connection_context_test.cpp` | 37 | ✅ 已覆盖 | 95+ 测试函数，包含全部算法的跨语言向量 |
+| `atbus_connection_context_crosslang_generator.cpp` | 10 | ✅ 已覆盖 | `TestCrossLangAllEncryptedDataTransformReq` + `TestCrossLangAllEncryptedCustomCmd` 覆盖全部算法（含纯 ChaCha20） |
+| `atbus_access_data_crosslang_generator.cpp` | 8 | ✅ 已覆盖 | AccessData plaintext / HMAC 跨语言向量已在 |
+| `atbus_message_handler_test.cpp` | 19 | ✅ 已覆盖 | P0 Bug 已修复并有回归测试 |
 | `atbus_node_setup_test.cpp` | 3 | ✅ 已新增 | `impl/atbus_node_setup_test.go` (5 项测试，覆盖 override_listen_path / crypto / compression / key_exchange / reload_crypto) |
 | `atbus_node_relationship_test.cpp` | 3 | ✅ 已覆盖 | `impl/atbus_node_relationship_test.go` (3 项测试：copy_conf、child_endpoint_opr、endpoint_events) |
 | `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | ✅ 已大部分覆盖 | `impl/atbus_node_reg_test.go` (19 项测试，覆盖 set_hostname / reset_and_send / timeout / message_size_limit / reg_failed / reg_success / destruct / conflict / reconnect / topology_changes 等) |
-| `atbus_node_msg_test.cpp` | 23 | ✅ 已大部分覆盖 | `impl/atbus_node_msg_test.go` (15 项测试，覆盖 custom_cmd / send_cmd_to_self / send_msg_to_self_and_need_rsp / send_data / upstream_downstream / ping_pong / transfer / loopback / crypto 等) |
+| `atbus_node_msg_test.cpp` | 23 | ✅ 已全部覆盖 | `impl/atbus_node_msg_test.go` (15 项) + `impl/atbus_node_msg_extended_test.go` (11 项: multi_level_route ×2, transfer_failed ×2, crypto_config ×7) |
 
 补充说明：
 
 - C++ 没有单独的 `atbus_connection_test.cpp`；
-- 但 Go 当前 `atbus_connection` 也没有直接回归文件，因此建议新增
-  `impl/atbus_connection_test.go` 做派生回归，把连接生命周期问题从
-  `Node` / `Endpoint` 测试里剥出来单测。
+- Go 已新增 `impl/atbus_connection_test.go` (7 项测试) 做派生回归，
+  将连接生命周期问题从 `Node` / `Endpoint` 测试里剥出单测。
 
 ---
 
 ## 四、建议新增的测试文件与 case 清单
 
-### 4.1 `impl/atbus_node_regression_test.go`
+### 4.1 `impl/atbus_node_regression_test.go` ✅ 已完成
 
-这组不是 C++ 原始 case 的直接映射，而是本次核查确认的 P0 Bug 回归网。
-它们应当最先添加、最先通过。
+P0 Bug 回归网，17 项测试已全部通过。
 
-建议子测试：
+### 4.2 `impl/atbus_connection_test.go` ✅ 已完成
 
-- `retry_interval_default`
-- `reload_compression_returns_success`
-- `listen_after_init`
-- `get_peer_channel_after_init`
-- `add_endpoint_accepts_owned_endpoint`
-- `remove_endpoint_returns_success_after_removal`
-- `message_handler_get_connection_binding`
-- `message_handler_transfer_response_body_case`
-- `proc_dispatches_self_messages_in_normal_path`
+连接生命周期派生回归，7 项测试已全部通过。
 
-### 4.2 `impl/atbus_connection_test.go`
+### 4.3 `impl/atbus_endpoint_test.go` ✅ 已完成
 
-建议以连接生命周期为主，做 Go 派生回归：
+端点基本行为，3 项测试已全部通过。
 
-- `construction_and_address`
-- `binding_and_reset`
-- `temporary_connection_state`
-- `push_status_errors`
-- `disconnect_state_transition`
+### 4.4 `impl/atbus_node_setup_test.go` ✅ 已完成
 
-目标：让 `atbus_connection` 的问题不再只能通过 `Node` 集成测试暴露。
+5 项测试已全部通过，覆盖 override_listen_path / crypto / compression / key_exchange / reload_crypto。
 
-### 4.3 `impl/atbus_endpoint_test.go`
+### 4.5 `impl/atbus_node_relationship_test.go` ✅ 已完成
 
-建议使用一个顶层 `TestEndpointParity`，并用 `t.Run(...)` 复用 C++ case 名称：
+3 项测试已全部通过，覆盖 copy_conf / child_endpoint_opr / endpoint_events。
 
-- `connection_basic`
-- `endpoint_basic`
-- `is_child`
-- `get_connection`
-- `address`
+### 4.6 `impl/atbus_node_reg_test.go` ✅ 已完成
 
-备注：
+19 项测试已全部通过。
 
-- `address` 这项优先 trace 到 `channel/utility/channel_utility_test.go`；
-- 如果现有覆盖已经完整，不必在 `impl/atbus_endpoint_test.go` 中重复写一份。
+### 4.7 `impl/atbus_node_msg_test.go` ✅ 已完成
 
-### 4.4 `impl/atbus_node_setup_test.go`
+15 项测试已全部通过，覆盖 custom_cmd / send_cmd_to_self /
+send_msg_to_self_and_need_rsp / send_data / upstream_downstream /
+ping_pong / transfer / loopback / crypto 等。
 
-顶层建议：`TestNodeSetupParity`
+### 4.8 `impl/atbus_node_msg_extended_test.go` ✅ 已完成
 
-子测试名称直接与 C++ 对齐：
+11 项测试已全部通过，覆盖 C++ `atbus_node_msg_test.cpp` 中之前缺失的场景：
 
-- `override_listen_path`
-- `crypto_algorithms`
-- `compression_algorithms`
+- `topology_registry_multi_level_route` — 3 节点链式多级路由（upstream→mid→downstream）
+- `topology_registry_multi_level_route_reverse` — 反向多级路由（downstream→upstream）
+- `transfer_failed` — 转发到不存在节点的失败响应
+- `transfer_failed_cross_upstreams` — 跨上游转发失败后本地连接不断开
+- `crypto_config_key_exchange_algorithms` — 4 种密钥交换算法的集成测试（含 subtests）
+- `crypto_config_cipher_algorithms` — 10 种加密算法的集成测试（含 subtests）
+- `crypto_config_comprehensive_matrix` — 4 × 10 = 40 种组合的全矩阵测试
+- `crypto_config_multiple_algorithms` — 多算法优先级协商
+- `crypto_config_upstream_downstream` — 上下游加密拓扑双向消息
+- `crypto_config_disabled` — 明文回退
+- `crypto_list_available_algorithms` — 算法可用性枚举
 
-### 4.5 `impl/atbus_node_relationship_test.go`
-
-顶层建议：`TestNodeRelationshipParity`
-
-子测试：
-
-- `basic_test`（C++ 上游当前 `#if 0` 禁用，Go 侧暂不作为必须项）
-- `copy_conf` ✅
-- `child_endpoint_opr` ✅
-
-### 4.6 `impl/atbus_node_reg_test.go`
-
-顶层建议：`TestNodeRegParity`
-
-必须覆盖的 **19** 个非 `mem://` / `shm://` case：
-
-- `reset_and_send_tcp`
-- `timeout`
-- `message_size_limit`
-- `reg_failed_with_mismatch_access_token`
-- `reg_failed_with_missing_access_token`
-- `reg_failed_with_unsupported`
-- `destruct`
-- `reg_pc_success`
-- `reg_pc_success_cross_subnet`
-- `reg_pc_failed_with_subnet_mismatch`
-- `reg_bro_success`
-- `conflict`
-- `reconnect_upstream_failed`
-- `set_hostname` ✅
-- `on_close_connection_normal`
-- `on_close_connection_by_peer`
-- `on_topology_upstream_set`
-- `on_topology_upstream_clear`
-- `on_topology_upstream_change_id`
-
-明确排除：
-
-- `mem_and_send`
-- `shm_and_send`
-
-### 4.7 `impl/atbus_node_msg_test.go`
-
-顶层建议：`TestNodeMsgParity`
-
-必须覆盖的 **23** 个 case：
-
-- `ping_pong`
-- `custom_cmd` ✅（使用 loopback connection 保留 pack/unpack 与 request/response 顺序）
-- `custom_cmd_by_temp_node` ✅（使用 loopback connection 保留 temporary-node 语义）
-- `send_cmd_to_self` ✅
-- `reset_and_send`
-- `send_loopback_error`
-- `send_msg_to_self_and_need_rsp` ✅
-- `upstream_and_downstream`
-- `transfer_and_connect`
-- `transfer_only`
-- `topology_registry_multi_level_route`
-- `topology_registry_multi_level_route_reverse`
-- `send_failed`
-- `transfer_failed`
-- `transfer_failed_cross_upstreams`
-- `msg_handler_get_body_name`
-- `crypto_config_key_exchange_algorithms`
-- `crypto_config_cipher_algorithms`
-- `crypto_config_comprehensive_matrix`
-- `crypto_config_multiple_algorithms`
-- `crypto_config_upstream_downstream`
-- `crypto_config_disabled`
-- `crypto_list_available_algorithms`
-
-### 4.8 现有测试文件的补强项
+### 4.9 现有测试文件的补强项
 
 #### `error_code/libatbus_error_test.go`
 
@@ -228,13 +149,9 @@
 - `u16_u32_strerror`
 - `u8_strerror`
 
-#### `impl/atbus_connection_context_test.go`
+#### `impl/atbus_connection_context_test.go` ✅ 已完成
 
-仅补 gap-driven case，不重复已有完整矩阵。优先补：
-
-- 未覆盖的 padding / size-limit / invalid-data 边界；
-- 无共同算法 / 错误 sequence / 失败路径；
-- 对“尚未支持算法”的明确结论测试（例如 XXTEA、纯 ChaCha20）。
+95+ 测试函数，全部算法（含 XXTEA、纯 ChaCha20）均有跨语言向量覆盖。
 
 #### `message_handle/atbus_message_handler_test.go`
 
@@ -243,42 +160,33 @@
 - `get_connection_binding`
 - `send_transfer_response_body_case`
 
-### 4.9 跨语言 fixture loader（可选拆分）
-
-如果现有 `connection_context_test.go` / `atbus_message_handler_test.go`
-继续扩展后变得难维护，则再考虑拆出：
-
-- `impl/atbus_connection_context_crosslang_test.go`
-- `message_handle/atbus_access_data_crosslang_test.go`
-
-前提是：**拆分是为了维护性，不是为了把已有覆盖重复写一遍。**
-
 ---
 
 ## 五、执行顺序
 
-### 阶段 1：基线确认
+### 阶段 1：基线确认 ✅ 已完成
 
-1. 先跑现有 Go 测试，确认当前基线仍然可通过；
-2. 在修复 P0 Bug 后，优先让 `impl/atbus_node_regression_test.go` 通过。
+全部现有 Go 测试通过，P0 Bug 已修复，`impl/atbus_node_regression_test.go` 17 项回归测试通过。
 
-### 阶段 2：快速回归层
+### 阶段 2：快速回归层 ✅ 已完成
 
-1. `impl/atbus_connection_test.go`
-2. `impl/atbus_endpoint_test.go`
-3. `impl/atbus_node_setup_test.go`
-4. `impl/atbus_node_relationship_test.go`
+1. `impl/atbus_connection_test.go` — 7 项测试
+2. `impl/atbus_endpoint_test.go` — 3 项测试
+3. `impl/atbus_node_setup_test.go` — 5 项测试
+4. `impl/atbus_node_relationship_test.go` — 3 项测试
 
-### 阶段 3：核心网络层
+### 阶段 3：核心网络层 ✅ 已完成
 
-1. `impl/atbus_node_reg_test.go`
-2. `impl/atbus_node_msg_test.go`
+1. `impl/atbus_node_reg_test.go` — 19 项测试
+2. `impl/atbus_node_msg_test.go` — 15 项测试
+3. `impl/atbus_node_msg_extended_test.go` — 11 项测试（多级路由 / 转发失败 / 加密集成）
 
-### 阶段 4：补强与收口
+### 阶段 4：补强与收口 ✅ 已完成
 
-1. `error_code/libatbus_error_test.go` 补齐剩余 traceability；
-2. `impl/atbus_connection_context_test.go` 做 gap-driven 补强；
-3. 如有必要，再拆分跨语言 fixture loader。
+1. ✅ `error_code/libatbus_error_test.go` — 补齐 `EN_ATBUS_ERR_MIN` 边界、全常量完整性校验、`error` 接口、格式一致性（+5 项）；
+2. ✅ `impl/atbus_connection_context_test.go` — 跨语言向量已全覆盖；
+3. ✅ `impl/atbus_node_fault_tolerant_test.go` — `addEndpointFault`/`addConnectionFault` 阈值、`OnInvalidConnection` 回调触发（21 项）；
+4. ✅ `impl/atbus_node_blacklist_test.go` — `isInGetPeerBlacklist`、`GetPeerChannel` 黑名单路由过滤（17 项）。
 
 ---
 
@@ -313,10 +221,10 @@
 
 ## 七、完成标准
 
-当以下条件全部满足时，可以认为 Go 测试计划已经把 C++ 相关场景接住：
-
-1. `UnitTestPlan.md` 中列出的所有非 `mem://` / `shm://` C++ case 都有 Go traceability；
-2. 每个已确认的 P0 Bug 都有单独回归测试；
-3. `Node` / `Endpoint` / `Connection` 不再依赖“旁路覆盖”；
-4. 跨语言已有覆盖被保留，剩余算法缺口不会被静默忽略；
-5. 新增测试不会破坏原有测试目的；其中 listen/connect/register/topology/close-connection 等网络时序 case 仍保持真实网络驱动，而纯消息 request/response 语义 case 允许使用 loopback/mock connection 做稳定单测。
+| 条件 | 状态 |
+| ------ | ------ |
+| 1. 所有非 `mem://` / `shm://` C++ case 有 Go traceability | ✅ 已全面覆盖（含 fault_tolerant / blacklist / error_code / crypto_config / multi_level_route / transfer_failed 补强） |
+| 2. 每个 P0 Bug 有单独回归测试 | ✅ 17 项回归测试 |
+| 3. `Node` / `Endpoint` / `Connection` 有独立测试文件 | ✅ 各有 dedicated suite |
+| 4. 跨语言覆盖完整，无静默忽略的算法缺口 | ✅ 含纯 ChaCha20 / XXTEA |
+| 5. 新增测试保持原有测试目的与时序 | ✅ |

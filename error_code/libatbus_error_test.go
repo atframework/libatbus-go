@@ -129,3 +129,122 @@ func TestLibatbusStrerrorUnknownCode(t *testing.T) {
 	// Assert
 	assert.Equal(t, "ATBUS_ERROR_TYPE(-123456): unknown", got)
 }
+
+func TestLibatbusStrerror_MinSentinel_IsUnknown(t *testing.T) {
+	// EN_ATBUS_ERR_MIN is a sentinel value (-999) that should NOT have a string mapping.
+	got := LibatbusStrerror(EN_ATBUS_ERR_MIN)
+	assert.Equal(t, "ATBUS_ERROR_TYPE(-999): unknown", got,
+		"EN_ATBUS_ERR_MIN sentinel should map to unknown")
+}
+
+func TestLibatbusStrerror_PositiveCode_IsUnknown(t *testing.T) {
+	// Positive error codes are never valid; verify they don't hit a map entry.
+	got := LibatbusStrerror(ErrorType(42))
+	assert.Equal(t, "ATBUS_ERROR_TYPE(42): unknown", got)
+}
+
+func TestLibatbusStrerror_MapCoversAllDefinedConstants(t *testing.T) {
+	// Ensure every error constant with a defined value (except EN_ATBUS_ERR_MIN sentinel)
+	// has a corresponding entry in the string map.
+	allCodes := []ErrorType{
+		EN_ATBUS_ERR_SUCCESS,
+		EN_ATBUS_ERR_PARAMS,
+		EN_ATBUS_ERR_INNER,
+		EN_ATBUS_ERR_NO_DATA,
+		EN_ATBUS_ERR_BUFF_LIMIT,
+		EN_ATBUS_ERR_MALLOC,
+		EN_ATBUS_ERR_SCHEME,
+		EN_ATBUS_ERR_BAD_DATA,
+		EN_ATBUS_ERR_INVALID_SIZE,
+		EN_ATBUS_ERR_NOT_INITED,
+		EN_ATBUS_ERR_ALREADY_INITED,
+		EN_ATBUS_ERR_ACCESS_DENY,
+		EN_ATBUS_ERR_UNPACK,
+		EN_ATBUS_ERR_PACK,
+		EN_ATBUS_ERR_UNSUPPORTED_VERSION,
+		EN_ATBUS_ERR_CLOSING,
+		EN_ATBUS_ERR_ALGORITHM_NOT_SUPPORT,
+		EN_ATBUS_ERR_MESSAGE_NOT_FINISH_YET,
+		EN_ATBUS_ERR_ATNODE_NOT_FOUND,
+		EN_ATBUS_ERR_ATNODE_INVALID_ID,
+		EN_ATBUS_ERR_ATNODE_NO_CONNECTION,
+		EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
+		EN_ATBUS_ERR_ATNODE_INVALID_MSG,
+		EN_ATBUS_ERR_ATNODE_BUS_ID_NOT_MATCH,
+		EN_ATBUS_ERR_ATNODE_TTL,
+		EN_ATBUS_ERR_ATNODE_MASK_CONFLICT,
+		EN_ATBUS_ERR_ATNODE_ID_CONFLICT,
+		EN_ATBUS_ERR_ATNODE_SRC_DST_IS_SAME,
+		EN_ATBUS_ERR_CHANNEL_SIZE_TOO_SMALL,
+		EN_ATBUS_ERR_CHANNEL_BUFFER_INVALID,
+		EN_ATBUS_ERR_CHANNEL_ADDR_INVALID,
+		EN_ATBUS_ERR_CHANNEL_CLOSING,
+		EN_ATBUS_ERR_CHANNEL_NOT_SUPPORT,
+		EN_ATBUS_ERR_CHANNEL_UNSUPPORTED_VERSION,
+		EN_ATBUS_ERR_CHANNEL_ALIGN_SIZE_MISMATCH,
+		EN_ATBUS_ERR_CHANNEL_ARCH_SIZE_T_MISMATCH,
+		EN_ATBUS_ERR_NODE_BAD_BLOCK_NODE_NUM,
+		EN_ATBUS_ERR_NODE_BAD_BLOCK_BUFF_SIZE,
+		EN_ATBUS_ERR_NODE_BAD_BLOCK_WSEQ_ID,
+		EN_ATBUS_ERR_NODE_BAD_BLOCK_CSEQ_ID,
+		EN_ATBUS_ERR_NODE_TIMEOUT,
+		EN_ATBUS_ERR_CRYPTO_DECRYPT,
+		EN_ATBUS_ERR_CRYPTO_ENCRYPT,
+		EN_ATBUS_ERR_CRYPTO_ALGORITHM_NOT_SUPPORT,
+		EN_ATBUS_ERR_CRYPTO_ALGORITHM_NOT_MATCH,
+		EN_ATBUS_ERR_CRYPTO_INVALID_IV,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_KEY_PAIR,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_READ_PEER_KEY,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_SEQUENCE_EXPIRED,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_NO_AVAILABLE_ALGORITHM,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_KDF_ERROR,
+		EN_ATBUS_ERR_CRYPTO_HANDSHAKE_KDF_NOT_SUPPORT,
+		EN_ATBUS_ERR_COMPRESSION_ALGORITHM_NOT_SUPPORT,
+		EN_ATBUS_ERR_SHM_GET_FAILED,
+		EN_ATBUS_ERR_SHM_NOT_FOUND,
+		EN_ATBUS_ERR_SHM_CLOSE_FAILED,
+		EN_ATBUS_ERR_SHM_PATH_INVALID,
+		EN_ATBUS_ERR_SHM_MAP_FAILED,
+		EN_ATBUS_ERR_SOCK_BIND_FAILED,
+		EN_ATBUS_ERR_SOCK_LISTEN_FAILED,
+		EN_ATBUS_ERR_SOCK_CONNECT_FAILED,
+		EN_ATBUS_ERR_PIPE_BIND_FAILED,
+		EN_ATBUS_ERR_PIPE_LISTEN_FAILED,
+		EN_ATBUS_ERR_PIPE_CONNECT_FAILED,
+		EN_ATBUS_ERR_PIPE_ADDR_TOO_LONG,
+		EN_ATBUS_ERR_PIPE_REMOVE_FAILED,
+		EN_ATBUS_ERR_PIPE_PATH_EXISTS,
+		EN_ATBUS_ERR_PIPE_LOCK_PATH_FAILED,
+		EN_ATBUS_ERR_DNS_GETADDR_FAILED,
+		EN_ATBUS_ERR_CONNECTION_NOT_FOUND,
+		EN_ATBUS_ERR_WRITE_FAILED,
+		EN_ATBUS_ERR_READ_FAILED,
+		EN_ATBUS_ERR_EV_RUN,
+		EN_ATBUS_ERR_NO_LISTEN,
+		EN_ATBUS_ERR_NOT_READY,
+	}
+
+	for _, code := range allCodes {
+		got := LibatbusStrerror(code)
+		assert.NotContains(t, got, "unknown",
+			"error code %d should have a known string mapping, got: %s", int32(code), got)
+	}
+}
+
+func TestErrorType_ImplementsErrorInterface(t *testing.T) {
+	// ErrorType should satisfy the error interface.
+	var err error = EN_ATBUS_ERR_PARAMS
+	assert.Contains(t, err.Error(), "EN_ATBUS_ERR_PARAMS")
+	assert.Contains(t, err.Error(), "-1")
+}
+
+func TestLibatbusStrerror_FormatConsistency(t *testing.T) {
+	// Every known code should follow the "NAME(code): message" format.
+	for code := ErrorType(-999); code <= 0; code++ {
+		got := LibatbusStrerror(code)
+		assert.Contains(t, got, "(", "output for code %d should contain '('", int32(code))
+		assert.Contains(t, got, ")", "output for code %d should contain ')'", int32(code))
+		assert.Contains(t, got, ":", "output for code %d should contain ':'", int32(code))
+	}
+}
