@@ -583,7 +583,7 @@ func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 // processConnectingTimeout handles timeout for connections that are still connecting
 func (n *Node) processConnectingTimeout(now time.Time) {
 	for {
-		_, pair, exists := n.eventTimer.connectingList.Front()
+		connAddr, pair, exists := n.eventTimer.connectingList.Front()
 		if !exists {
 			break
 		}
@@ -608,18 +608,24 @@ func (n *Node) processConnectingTimeout(now time.Time) {
 			n.LogError(nil, pair.Value, int(error_code.EN_ATBUS_ERR_NODE_TIMEOUT), 0,
 				fmt.Sprintf("connection %s timeout", pair.Value.GetAddress().GetAddress()))
 		}
-		pair.Value.Reset()
+		conn := pair.Value
+		conn.Reset()
 
-		// Fire callback
-		handle := n.eventHandleset.OnInvalidConnection
-		if handle != nil {
-			fgd := &nodeFlagGuard{}
-			fgd.openFlag(n, types.NodeFlag_InCallback)
-			handle(n, pair.Value, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
-			fgd.closeFlag()
+		// Match C++ node::proc timeout cleanup: Reset() may already remove the
+		// front entry and notify through removeConnectionTimer(). Only fire an
+		// extra callback when the timed-out entry is still the current front.
+		nextAddr, nextPair, stillFront := n.eventTimer.connectingList.Front()
+		if stillFront && nextAddr == connAddr && nextPair.Value == conn {
+			handle := n.eventHandleset.OnInvalidConnection
+			if handle != nil {
+				fgd := &nodeFlagGuard{}
+				fgd.openFlag(n, types.NodeFlag_InCallback)
+				handle(n, conn, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
+				fgd.closeFlag()
+			}
+
+			n.eventTimer.connectingList.PopFront()
 		}
-
-		n.eventTimer.connectingList.PopFront()
 	}
 }
 

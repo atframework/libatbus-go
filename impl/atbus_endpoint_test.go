@@ -1,3 +1,9 @@
+// Package libatbus_impl provides internal implementation details for libatbus.
+//
+// Traceability for C++ atbus_endpoint_test.cpp:
+//   - connection_basic / endpoint_basic / get_connection: covered here.
+//   - is_child and related topology assertions: covered in atbus_topology_test.go.
+//   - address parsing/schema handling: covered in channel/utility/channel_utility_test.go.
 package libatbus_impl
 
 import (

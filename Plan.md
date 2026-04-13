@@ -16,17 +16,19 @@
 
 ## 一、结论先行
 
-- ✅ `atbus_node` **所有 P0 Bug 均已修复**，且有 17 项专项回归测试兜底。
-  当前已有 19 项注册测试、26 项消息测试（15 基础 + 11 扩展）、5 项 setup 测试、3 项关系测试。
-- ✅ `atbus_endpoint` 与 `atbus_connection` 已不再受 `Node` 集成问题拖累；
-  根包公开 API 已暴露充分，各有专项测试。
-- ✅ `atbus_connection_context`、`protocol`、`topology`、`buffer`、`io_stream`
-  各模块均已完整对齐。
-- ✅ 此前跨语言互通的主要缺口集中在 **XXTEA** 与 **纯 ChaCha20**；
-  当前两者的实现与跨语言测试向量已全部补齐。
-  AES/CBC、AES/GCM、ChaCha20-Poly1305、XChaCha20-Poly1305、纯 ChaCha20、XXTEA、压缩、
-  AccessData/HMAC、握手确认流程均有实现与跨语言向量覆盖。
-- 所有模块 `go test ./...` 全部通过。
+- ✅ `libatbus-go` 的**核心运行时能力**（`Node` / `Endpoint` / `Connection` /
+  `ConnectionContext` / `Topology` / `io_stream` / 跨语言加解密与压缩）已基本对齐 C++，
+  且当前模块级 `go test ./...` 全部通过。
+- ✅ 除 `mem://` / `shm://` 外，**未发现新的大面积功能缺失**；此前 P0/P1 主缺口与
+  XXTEA / 纯 ChaCha20 等跨语言算法缺口均已修复。
+- ✅ 本轮已收口此前确认的两类差异：
+  1. **`atbus_node` setup / public helper API**：Go 已补齐
+    `ParseCryptoAlgorithmName()` /
+    `ParseCompressionAlgorithmName()`，并在 `types` / 根包测试中增加 direct parity 断言；
+  2. **连接超时的 `OnInvalidConnection` 回调流程**：Go `processConnectingTimeout()`
+    已改为遵循 C++ 的保护性检查，只保留单次通知。
+- ✅ 因此，在**排除 `mem://` / `shm://`** 的既定范围内，当前状态可以表述为：
+  **“核心能力、公开 helper、关键流程与跨语言互通已对齐，未再保留已确认差异”**。
 
 ---
 
@@ -34,7 +36,7 @@
 
 | 模块 | 当前状态 | 已核实结论 | 主要缺口 / 风险 |
 | ------ | ---------- | ------------ | ----------------- |
-| `atbus_node` | ✅ 已修复并有回归测试 | 主体接口存在，所有 P0 Bug 均已修复 | P0-1 ~ P0-9 全部修复，有 17 项回归测试、19 项注册测试、15 项消息测试、5 项 setup 测试 |
+| `atbus_node` | ✅ 已对齐 | 主体接口存在，所有 P0 Bug 均已修复 | connecting timeout 的 `OnInvalidConnection` 已改为单回调 |
 | `atbus_endpoint` | ✅ 已对齐 | 统计、连接选择、listen 地址管理主体已在；已有 dedicated tests | Node 集成问题已解决；3 项专项测试 |
 | `atbus_connection` | ✅ 已对齐 | 生命周期主体存在；不支持 `mem://` / `shm://` 属设计范围 | 根包已有 `CreateConnection` 公开入口；7 项专项回归测试 |
 | `atbus_connection_context` | ✅ 已对齐 | 握手、HKDF、压缩、主流 cipher、XXTEA、纯 ChaCha20 已在 | 跨语言向量已全覆盖（含纯 ChaCha20） |
@@ -42,6 +44,7 @@
 | `atbus_topology` | ✅ 已对齐 | 接口和核心行为已基本对齐 | 保持回归测试即可 |
 | `channel/io_stream` | ✅ 已对齐 | TCP / Unix / pipe 风格 I/O 流能力基本齐 | 无需新增 mem/shm 能力 |
 | `channel/utility` | ✅ 已对齐 | 地址解析、优先级相关能力已在 | 保持回归测试即可 |
+| `node setup / public helper API` | ✅ 已对齐 | 算法枚举、reload、能力矩阵、direct parse helper 均可用 | 根包 `Parse*AlgorithmName()` + `types.Parse*AlgorithmName()` 已补齐 |
 | `buffer` | ✅ 已对齐 | 覆盖较充分 | 无 |
 | `error_code` | ✅ 主体已在 | 错误码映射主体已在 | 补足剩余字符串映射用例 |
 | `protocol` | ✅ 已对齐 | `.proto` 一致 | 无 |
@@ -81,6 +84,16 @@
 - 为 `mem://` / `shm://` 保留的连接回调与时间推进接口；
 - `Shutdown` / `on_node_down` 根据回调返回值延迟 `reset()` — C++ 当前实现也不会这样做；
 - `Poll()` 与 `connection.Proc()` 的设计差异属正常范围，不应按 `mem://` / `shm://` 模型强行追平。
+
+### 3.3 本轮已收口的差异
+
+- ✅ Go 已补齐 C++ `node::parse_crypto_algorithm_name()` /
+  `parse_compression_algorithm_name()` 的等价 helper：
+  `types.ParseCryptoAlgorithmName()` / `types.ParseCompressionAlgorithmName()`，
+  以及根包公开入口 `ParseCryptoAlgorithmName()` /
+  `ParseCompressionAlgorithmName()`。
+- ✅ Go `processConnectingTimeout()` 已改为在 `Reset()` 后检查当前 front entry 是否仍为原定时项，
+  仅在需要保护性清理时再触发额外回调，与 C++ timeout 路径保持单回调语义。
 
 ---
 
@@ -122,8 +135,15 @@
 - ✅ **跨子网注册**：`TestNodeRegParity_RegPcSuccessCrossSubnet`（跨子网成功）、`TestNodeRegParity_RegPcFailedWithSubnetMismatch`（子网不匹配拒绝）；
 - ✅ **冲突路由 / fallback 到上游**：`TestNodeMsgParity_TransferAndConnect`、`TestNodeMsgParity_TransferOnly` 覆盖多跳转发与路由；
 - ✅ **上游 ping / reconnect 调度**：`TestNodeMsgParity_PingPong` 覆盖 ping 定时器触发与响应；
-- ⚠️ **`fault_tolerant` 计数累积、`OnInvalidConnection` 触发阈值**：Go 使用 goroutine 模型，与 C++ libuv 单线程模型存在设计差异，当前无直接专项测试，属于可选改进；
-- ⚠️ **`NodeGetPeerOptions.blacklist`**：当前无直接专项测试，优先级较低。
+- ✅ **`OnInvalidConnection` 的 timeout 回调次数**：已修复为 connecting timeout 场景单次回调，`impl/atbus_node_fault_tolerant_test.go` 已改为 parity 断言；
+- ✅ **`NodeGetPeerOptions.blacklist`**：`impl/atbus_node_blacklist_test.go` 已覆盖黑名单过滤与路由 fallback 边界；
+
+### 4.4 P2：本轮已完成收口项
+
+| 编号 | 原问题 | 当前结果 | 涉及文件 |
+| ------ | -------- | ---------- | ---------- |
+| P2-1 | Go 未提供 C++ `node::parse_crypto_algorithm_name` / `node::parse_compression_algorithm_name` 等价公开 helper | ✅ 已补齐 `types.Parse*AlgorithmName()` 与根包 `Parse*AlgorithmName()`，并新增 direct tests | `types/atbus_algorithm_parse.go`, `atbus_node.go`, `atbus_node_test.go`, `impl/atbus_node_setup_test.go` |
+| P2-2 | Go connecting timeout 场景会双触发 `OnInvalidConnection` | ✅ 已对齐 C++ timeout 路径，改为单回调，并更新 parity 测试 | `impl/atbus_node.go`, `impl/atbus_node_fault_tolerant_test.go`, C++ `src/atbus_node.cpp` |
 
 ---
 
@@ -159,6 +179,11 @@
   `error_code`、`topology`、`message_handle`、`connection_context` 等模块；
 - ✅ `Node`、`Endpoint`、`Connection` 的测试空洞已补齐，各有独立测试文件；
 - C++ 基准 case 计数：
+  - `atbus_node_setup_test.cpp`：**3** 个 case；Go 侧有 **5** 个 impl 测试 + 根包 direct helper tests，
+    `crypto_algorithms` / `compression_algorithms` 已覆盖 C++ `parse_*` helper parity 与语义校验；
+  - `atbus_endpoint_test.cpp`：**5** 个 case；Go 侧覆盖分散在
+    `impl/atbus_endpoint_test.go`、`impl/atbus_topology_test.go` 与
+    `channel/utility/channel_utility_test.go`，不能简单视为“3 个 dedicated tests 即 1:1 等价”；
   - `atbus_message_handler_test.cpp`：**19** 个 case；
   - `atbus_node_msg_test.cpp`：**23** 个 case（含 crypto_config 7 个、multi_level_route 2 个、transfer_failed 2 个），
     Go 侧已全部覆盖（`atbus_node_msg_test.go` 15 项 + `atbus_node_msg_extended_test.go` 11 项 = 26 项）；
@@ -205,9 +230,13 @@
     - `crypto_config_disabled`（明文回退）
     - `crypto_list_available_algorithms`（算法可用性枚举）
 
-### 剩余可选改进
+### 本轮收口结果
 
-全部已完成。
+1. ✅ `atbus_node_setup_test.cpp` 的 `crypto_algorithms` /
+  `compression_algorithms` 已补 direct parse helper parity；
+2. ✅ `OnInvalidConnection` 的 connecting timeout 场景已改为
+  Go / C++ 同步的单回调语义；
+3. ✅ `atbus_endpoint_test.cpp` 的 Go traceability 已在文档与测试文件注释中明确为“分散覆盖”。
 
 ---
 
@@ -217,11 +246,15 @@
 | ------ | ------ |
 | 1. 全部 P0 问题被修复并有对应回归测试 | ✅ 已达成 |
 | 2. `Node` / `Endpoint` / `Connection` 拥有独立测试文件 | ✅ 已达成 |
-| 3. `UnitTestPlan.md` 中全部非 `mem://` / `shm://` C++ 场景有 Go 侧 traceability | ✅ 已全面覆盖，含 `fault_tolerant` / `blacklist` / `error_code` / `crypto_config` / `multi_level_route` / `transfer_failed` 补强 |
+| 3. `UnitTestPlan.md` 中全部非 `mem://` / `shm://` C++ 场景有 Go 侧 traceability | ✅ 已达成 |
 | 4. 跨语言算法列表与行为完整对齐或有明确结论 | ✅ 全部算法均有实现与跨语言向量（含纯 ChaCha20） |
 | 5. 根包公开 API 的创建与删除路径对外可用、可测试 | ✅ 已达成 |
+| 6. 已确认的非 `mem://` / `shm://` API/流程差异（`parse_*` helper、`OnInvalidConnection` timeout 双回调）已关闭 | ✅ 已达成 |
 
-**结论：`libatbus-go` 已进入"接口、行为与跨语言互通全面对齐"状态。**
-全部 P0/P1 问题已修复，跨语言向量全覆盖，行为边界均有专项测试。
+**结论：`libatbus-go` 在排除 `mem://` / `shm://` 的既定范围内，
+已达到“核心接口、核心行为、公开 helper 与跨语言互通对齐，且无已确认遗留差异”的状态。**
+全部 P0/P1 主问题已修复，跨语言向量已覆盖，
 加密配置集成测试（4 key exchange × 10 cipher 全矩阵）、多级拓扑路由、
-转发失败与跨上游转发失败容错均已通过集成测试覆盖。
+转发失败与跨上游转发失败容错均已通过测试覆盖；
+此前确认的 setup 字符串解析 helper API 缺口，
+以及 connecting timeout 的 `OnInvalidConnection` 双回调，现均已收口。

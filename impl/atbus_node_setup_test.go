@@ -86,33 +86,36 @@ func TestNodeSetupParity_OverrideListenPath(t *testing.T) {
 }
 
 // TestNodeSetupParity_CryptoAlgorithms mirrors C++ atbus_node_setup::crypto_algorithms.
-// Go does not have parse_crypto_algorithm_name (enums are used directly);
-// instead we verify the enum-to-string mapping and key/IV size helpers are
-// consistent across all supported algorithms.
+// Besides metadata checks, it now also verifies the C++-style parse helper mapping.
 func TestNodeSetupParity_CryptoAlgorithms(t *testing.T) {
 	algorithms := []struct {
-		name    string
-		enumVal protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
-		keySize int
-		ivSize  int
-		isAEAD  bool
-		tagSize int
+		name      string
+		parseName string
+		enumVal   protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
+		keySize   int
+		ivSize    int
+		isAEAD    bool
+		tagSize   int
 	}{
-		{"XXTEA", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA, 16, 0, false, 0},
-		{"CHACHA20", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, 32, 16, false, 0},
-		{"CHACHA20-POLY1305", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF, 32, 12, true, 16},
-		{"XCHACHA20-POLY1305", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF, 32, 24, true, 16},
-		{"AES-128-CBC", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC, 16, 16, false, 0},
-		{"AES-128-GCM", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM, 16, 12, true, 16},
-		{"AES-192-CBC", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC, 24, 16, false, 0},
-		{"AES-192-GCM", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM, 24, 12, true, 16},
-		{"AES-256-CBC", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC, 32, 16, false, 0},
-		{"AES-256-GCM", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM, 32, 12, true, 16},
+		{"XXTEA", "xxtea", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XXTEA, 16, 0, false, 0},
+		{"CHACHA20", "chacha20", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20, 32, 16, false, 0},
+		{"CHACHA20-POLY1305", "chacha20-poly1305-ietf", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF, 32, 12, true, 16},
+		{"XCHACHA20-POLY1305", "xchacha20-poly1305-ietf", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF, 32, 24, true, 16},
+		{"AES-128-CBC", "aes-128-cbc", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC, 16, 16, false, 0},
+		{"AES-128-GCM", "aes-128-gcm", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM, 16, 12, true, 16},
+		{"AES-192-CBC", "aes-192-cbc", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC, 24, 16, false, 0},
+		{"AES-192-GCM", "aes-192-gcm", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM, 24, 12, true, 16},
+		{"AES-256-CBC", "aes-256-cbc", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC, 32, 16, false, 0},
+		{"AES-256-GCM", "aes-256-gcm", protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM, 32, 12, true, 16},
 	}
 
 	count := 0
 	for _, algo := range algorithms {
 		t.Run(algo.name, func(t *testing.T) {
+			// Verify C++-style helper parity.
+			parsed := types.ParseCryptoAlgorithmName(algo.parseName)
+			assert.Equal(t, algo.enumVal, parsed)
+
 			// Verify string representation
 			str := cryptoAlgorithmString(algo.enumVal)
 			assert.NotEmpty(t, str)
@@ -141,22 +144,26 @@ func TestNodeSetupParity_CryptoAlgorithms(t *testing.T) {
 }
 
 // TestNodeSetupParity_CompressionAlgorithms mirrors C++ atbus_node_setup::compression_algorithms.
-// Go does not have parse_compression_algorithm_name; instead we verify the
-// enum-to-string mapping and support-check for each known compression.
+// Besides metadata checks, it now also verifies the C++-style parse helper mapping.
 func TestNodeSetupParity_CompressionAlgorithms(t *testing.T) {
 	algorithms := []struct {
-		name    string
-		enumVal protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
+		name      string
+		parseName string
+		enumVal   protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
 	}{
-		{"ZSTD", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_ZSTD},
-		{"LZ4", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_LZ4},
-		{"SNAPPY", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_SNAPPY},
-		{"ZLIB", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_ZLIB},
+		{"ZSTD", "zstd", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_ZSTD},
+		{"LZ4", "lz4", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_LZ4},
+		{"SNAPPY", "snappy", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_SNAPPY},
+		{"ZLIB", "zlib", protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_ZLIB},
 	}
 
 	count := 0
 	for _, algo := range algorithms {
 		t.Run(algo.name, func(t *testing.T) {
+			// Verify C++-style helper parity.
+			parsed := types.ParseCompressionAlgorithmName(algo.parseName)
+			assert.Equal(t, algo.enumVal, parsed)
+
 			// Verify string representation
 			str := compressionAlgorithmString(algo.enumVal)
 			assert.NotEmpty(t, str)
@@ -170,6 +177,11 @@ func TestNodeSetupParity_CompressionAlgorithms(t *testing.T) {
 	}
 
 	assert.Greater(t, count, 0, "At least one compression algorithm must be tested")
+
+	assert.Equal(t,
+		protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE,
+		types.ParseCompressionAlgorithmName("gzip"),
+	)
 
 	// Note: In Go, NONE compression returns true from the support check delegate
 	// (the underlying compression library treats NONE as a pass-through).

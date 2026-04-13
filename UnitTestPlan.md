@@ -3,6 +3,9 @@
 > 目标：在 **不引入 `mem://` / `shm://`** 的前提下，建立一套可追溯、可执行、
 > 不破坏原始测试目的与核心时序的 Go 测试计划，覆盖 C++ `libatbus`
 > 当前测试中的全部相关场景。
+> 2026-04 复核结论：全部非 `mem://` / `shm://` 相关已确认差异已收口，
+> 当前 `go test ./...` 通过；`parse_*` helper API 已补 direct parity，
+> `OnInvalidConnection` 的 connecting timeout 场景也已对齐为 C++ 单回调行为。
 
 ---
 
@@ -65,19 +68,19 @@
 
 | C++ 测试文件 | Case 数 | Go 当前状态 | 处理策略 |
 | -------------- | --------- | ------------- | ---------- |
-| `libatbus_error_test.cpp` | 6 | 部分覆盖 | 在现有 `error_code/libatbus_error_test.go` 中补齐剩余 case |
+| `libatbus_error_test.cpp` | 6 | ✅ 已覆盖 | `error_code/libatbus_error_test.go` 已覆盖已知/未知码、哨兵值、完整性校验、格式一致性与 `error` 接口 |
 | `buffer_test.cpp` | 11 | 已覆盖 | 维持现状 |
 | `channel_io_stream_tcp_test.cpp` | 8 | 已覆盖 | 维持现状 |
 | `channel_io_stream_unix_test.cpp` | 5 | 已覆盖（平台相关） | Windows 上按能力等价或 `t.Skip()` |
 | `atbus_topology_test.cpp` | 9 | 已覆盖 | 维持现状 |
-| `atbus_endpoint_test.cpp` | 5 | ✅ 已新增 dedicated suite | `impl/atbus_endpoint_test.go` (3 项测试) |
+| `atbus_endpoint_test.cpp` | 5 | ✅ 已覆盖（分散落点） | `impl/atbus_endpoint_test.go` 覆盖 `connection_basic` / `endpoint_basic` / `get_connection`，`impl/atbus_topology_test.go` 覆盖关系类断言，`channel/utility/channel_utility_test.go` 覆盖 `address` |
 | `atbus_connection_context_test.cpp` | 37 | ✅ 已覆盖 | 95+ 测试函数，包含全部算法的跨语言向量 |
 | `atbus_connection_context_crosslang_generator.cpp` | 10 | ✅ 已覆盖 | `TestCrossLangAllEncryptedDataTransformReq` + `TestCrossLangAllEncryptedCustomCmd` 覆盖全部算法（含纯 ChaCha20） |
 | `atbus_access_data_crosslang_generator.cpp` | 8 | ✅ 已覆盖 | AccessData plaintext / HMAC 跨语言向量已在 |
 | `atbus_message_handler_test.cpp` | 19 | ✅ 已覆盖 | P0 Bug 已修复并有回归测试 |
-| `atbus_node_setup_test.cpp` | 3 | ✅ 已新增 | `impl/atbus_node_setup_test.go` (5 项测试，覆盖 override_listen_path / crypto / compression / key_exchange / reload_crypto) |
+| `atbus_node_setup_test.cpp` | 3 | ✅ direct parity + 语义覆盖 | `impl/atbus_node_setup_test.go` 覆盖 override_listen_path / crypto / compression / key_exchange / reload_crypto，且 `atbus_node_test.go` + `types.Parse*AlgorithmName()` 补齐 C++ `parse_*` helper 的 direct parity |
 | `atbus_node_relationship_test.cpp` | 3 | ✅ 已覆盖 | `impl/atbus_node_relationship_test.go` (3 项测试：copy_conf、child_endpoint_opr、endpoint_events) |
-| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | ✅ 已大部分覆盖 | `impl/atbus_node_reg_test.go` (19 项测试，覆盖 set_hostname / reset_and_send / timeout / message_size_limit / reg_failed / reg_success / destruct / conflict / reconnect / topology_changes 等) |
+| `atbus_node_reg_test.cpp` | 21（其中 2 个排除） | ✅ 已覆盖 | `impl/atbus_node_reg_test.go` (19 项测试，覆盖全部非 `mem://` / `shm://` 相关 case：set_hostname / reset_and_send / timeout / message_size_limit / reg_failed / reg_success / destruct / conflict / reconnect / topology_changes 等) |
 | `atbus_node_msg_test.cpp` | 23 | ✅ 已全部覆盖 | `impl/atbus_node_msg_test.go` (15 项) + `impl/atbus_node_msg_extended_test.go` (11 项: multi_level_route ×2, transfer_failed ×2, crypto_config ×7) |
 
 补充说明：
@@ -153,12 +156,42 @@ ping_pong / transfer / loopback / crypto 等。
 
 95+ 测试函数，全部算法（含 XXTEA、纯 ChaCha20）均有跨语言向量覆盖。
 
-#### `message_handle/atbus_message_handler_test.go`
+#### `message_handle/atbus_message_handler_test.go` ✅ 已补强
 
-至少新增两个定向回归：
+已补以下定向回归：
 
 - `get_connection_binding`
 - `send_transfer_response_body_case`
+
+### 4.10 `impl/atbus_node_setup_test.go` ✅ 已收口 direct API parity
+
+- C++ `atbus_node_setup_test.cpp` 的 `crypto_algorithms` /
+  `compression_algorithms` 直接测试
+  `node::parse_crypto_algorithm_name()` /
+  `node::parse_compression_algorithm_name()`；
+- Go 现已补齐 `types.ParseCryptoAlgorithmName()` /
+  `types.ParseCompressionAlgorithmName()`，并由根包
+  `ParseCryptoAlgorithmName()` /
+  `ParseCompressionAlgorithmName()` 对外公开；
+- `impl/atbus_node_setup_test.go` 现同时验证 parse helper parity 与原有元数据/能力语义，
+  `atbus_node_test.go` 进一步锁定根包公开 helper 的 direct API parity。
+
+### 4.11 `impl/atbus_node_fault_tolerant_test.go` ✅ 已对齐回调语义
+
+- `TestOnInvalidConnection_FiresOnConnectingTimeout` 现明确断言
+  Go 在 connecting timeout 场景只触发**一次** `OnInvalidConnection`；
+- `impl/atbus_node.go` 的 timeout 处理已改为在 `Reset()` 后复查当前 front entry，
+  与 C++ `node::proc()` 的保护性清理语义一致；
+- 该 case 不再固化 Go 特有双回调行为，而是直接作为 C++ parity 断言。
+
+### 4.12 `atbus_endpoint_test.cpp` 的 traceability 已写清“分散覆盖”
+
+- `connection_basic` / `endpoint_basic` / `get_connection` 主要对应
+  `impl/atbus_endpoint_test.go`；
+- `is_child` / 关系类断言主要落在 `impl/atbus_topology_test.go` 与相关拓扑集成测试；
+- `address` 对应 `channel/utility/channel_utility_test.go`；
+- 已在本文档和 `impl/atbus_endpoint_test.go` 顶部注释中明确这些落点；
+- 因此该 C++ 文件应表述为“Go 已覆盖，但 coverage 分散在多个测试文件中”。
 
 ---
 
@@ -187,6 +220,13 @@ ping_pong / transfer / loopback / crypto 等。
 2. ✅ `impl/atbus_connection_context_test.go` — 跨语言向量已全覆盖；
 3. ✅ `impl/atbus_node_fault_tolerant_test.go` — `addEndpointFault`/`addConnectionFault` 阈值、`OnInvalidConnection` 回调触发（21 项）；
 4. ✅ `impl/atbus_node_blacklist_test.go` — `isInGetPeerBlacklist`、`GetPeerChannel` 黑名单路由过滤（17 项）。
+
+### 阶段 5：差异收口 ✅ 已完成
+
+1. ✅ 已补 `parse_crypto_algorithm_name` /
+  `parse_compression_algorithm_name` 等价 helper，并补 direct API tests；
+2. ✅ connecting timeout 的 `OnInvalidConnection` case 已改成单回调 parity 断言；
+3. ✅ `atbus_endpoint_test.cpp` 的 5 个 C++ case Go 落点已在文档与测试文件顶部注释中写清。
 
 ---
 
@@ -223,8 +263,8 @@ ping_pong / transfer / loopback / crypto 等。
 
 | 条件 | 状态 |
 | ------ | ------ |
-| 1. 所有非 `mem://` / `shm://` C++ case 有 Go traceability | ✅ 已全面覆盖（含 fault_tolerant / blacklist / error_code / crypto_config / multi_level_route / transfer_failed 补强） |
+| 1. 所有非 `mem://` / `shm://` C++ case 有 Go traceability | ✅ 已完成 |
 | 2. 每个 P0 Bug 有单独回归测试 | ✅ 17 项回归测试 |
 | 3. `Node` / `Endpoint` / `Connection` 有独立测试文件 | ✅ 各有 dedicated suite |
 | 4. 跨语言覆盖完整，无静默忽略的算法缺口 | ✅ 含纯 ChaCha20 / XXTEA |
-| 5. 新增测试保持原有测试目的与时序 | ✅ |
+| 5. 新增测试保持原有测试目的与时序 | ✅ 已完成；`OnInvalidConnection` timeout 场景已收口到 C++ parity |

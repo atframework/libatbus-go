@@ -2,6 +2,7 @@ package libatbus
 
 import (
 	libatbus_impl "github.com/atframework/libatbus-go/impl"
+	protocol "github.com/atframework/libatbus-go/protocol"
 	types "github.com/atframework/libatbus-go/types"
 )
 
@@ -39,4 +40,14 @@ func CreateNode(id BusIdType, conf *NodeConfigure) (Node, ErrorType) {
 	}
 
 	return ret, errCode
+}
+
+// ParseCryptoAlgorithmName maps a libatbus C++ cipher name to the matching protocol enum.
+func ParseCryptoAlgorithmName(name string) protocol.ATBUS_CRYPTO_ALGORITHM_TYPE {
+	return types.ParseCryptoAlgorithmName(name)
+}
+
+// ParseCompressionAlgorithmName maps a libatbus C++ compression name to the matching protocol enum.
+func ParseCompressionAlgorithmName(name string) protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE {
+	return types.ParseCompressionAlgorithmName(name)
 }

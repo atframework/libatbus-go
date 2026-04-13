@@ -272,9 +272,8 @@ func TestOnInvalidConnection_FiresOnConnectingTimeout(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
 	// Track callback invocations
-	// Note: OnInvalidConnection fires TWICE per connecting timeout:
-	// 1. conn.Reset() → removeConnectionTimer() → fires callback
-	// 2. processConnectingTimeout() → fires callback directly
+	// Match C++ node::proc timeout cleanup: the timed-out connection should only
+	// notify once, even though Reset() internally removes the timer entry.
 	var callbackCount int32
 	var lastCallbackErrCode atomic.Value
 	n.SetEventHandleOnInvalidConnection(func(node types.Node, conn types.Connection, errCode error_code.ErrorType) error_code.ErrorType {
@@ -299,9 +298,9 @@ func TestOnInvalidConnection_FiresOnConnectingTimeout(t *testing.T) {
 	// Act: process connecting timeout with current time
 	n.processConnectingTimeout(time.Now())
 
-	// Assert: callback fires twice (once from Reset→removeConnectionTimer, once from processConnectingTimeout)
-	assert.Equal(t, int32(2), callbackCount,
-		"OnInvalidConnection callback fires twice: once from Reset path, once from direct call")
+	// Assert: callback fires exactly once (C++ parity)
+	assert.Equal(t, int32(1), callbackCount,
+		"OnInvalidConnection callback should fire exactly once for a timed-out connection")
 	stored := lastCallbackErrCode.Load()
 	require.NotNil(t, stored)
 	assert.Equal(t, error_code.EN_ATBUS_ERR_NODE_TIMEOUT, stored.(error_code.ErrorType))
