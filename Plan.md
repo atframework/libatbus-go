@@ -46,7 +46,7 @@
 | `channel/utility` | ✅ 已对齐 | 地址解析、优先级相关能力已在 | 保持回归测试即可 |
 | `node setup / public helper API` | ✅ 已对齐 | 算法枚举、reload、能力矩阵、direct parse helper 均可用 | 根包 `Parse*AlgorithmName()` + `types.Parse*AlgorithmName()` 已补齐 |
 | `buffer` | ✅ 已对齐 | 覆盖较充分 | 无 |
-| `error_code` | ✅ 主体已在 | 错误码映射主体已在 | 补足剩余字符串映射用例 |
+| `error_code` | ✅ 已对齐 | 错误码映射、哨兵值、格式一致性与 `error` 接口测试均已覆盖 | 无 |
 | `protocol` | ✅ 已对齐 | `.proto` 一致 | 无 |
 | `channel_mem` | N/A | 不在 Go 范围内 | 明确不做 |
 | `channel_shm` | N/A | 不在 Go 范围内 | 明确不做 |

@@ -1,0 +1,10 @@
+# libatbus-go
+
+See `AGENTS.md` for the full project rules, architecture,
+and C++ parity guidelines.
+
+See `.agents/skills/` for operational playbooks:
+- `build/` — Build, code generation, dependencies
+- `testing/` — Run and write tests, cross-language vectors
+- `protocol-crypto/` — ECDH handshake, encryption/compression, message framing
+- `architecture/` — Module structure, concurrency model, C++ parity patterns

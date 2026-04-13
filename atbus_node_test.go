@@ -93,6 +93,9 @@ func TestParseCryptoAlgorithmNameMatchesCxxMappings(t *testing.T) {
 		{name: "aes 256 cbc", input: "aes-256-cbc", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC},
 		{name: "aes 256 gcm", input: "aes-256-gcm", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
 		{name: "case insensitive", input: "AES-256-GCM", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM},
+		{name: "no whitespace trimming prefix", input: " aes-256-gcm", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE},
+		{name: "no whitespace trimming suffix", input: "aes-256-gcm ", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE},
+		{name: "empty", input: "", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE},
 		{name: "unknown", input: "aes256gcm", expected: protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE},
 	}
 
@@ -114,6 +117,9 @@ func TestParseCompressionAlgorithmNameMatchesCxxMappings(t *testing.T) {
 		{name: "snappy", input: "snappy", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_SNAPPY},
 		{name: "zlib", input: "zlib", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_ZLIB},
 		{name: "case insensitive", input: "SNAPPY", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_SNAPPY},
+		{name: "no whitespace trimming prefix", input: " snappy", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE},
+		{name: "no whitespace trimming suffix", input: "snappy ", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE},
+		{name: "empty", input: "", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE},
 		{name: "unknown", input: "gzip", expected: protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE},
 	}
 
