@@ -1,0 +1,49 @@
+# Config for standalone C++ echo server (no upstream/proxy).
+# Used by cross-language peer tests (GoToCppEcho, GoMultipleMessages).
+# Copyright 2026 atframework
+atapp:
+  id: 0x00000001
+  id_mask: 8.8.8.8
+  name: "sample_echo_svr-standalone"
+  type_id: 1
+  type_name: "sample_echo_svr"
+
+  hostname: "crosslang-test-host"
+  bus:
+    listen: "ipv4://127.0.0.1:21437"
+    subnets: "0/16"
+    loop_times: 1000
+    ttl: 16
+    backlog: 256
+    access_token_max_number: 5
+    overwrite_listen_path: false
+    first_idle_timeout: 30s
+    ping_interval: 60s
+    retry_interval: 3s
+    fault_tolerant: 3
+    message_size: 262144
+    receive_buffer_size: 8388608
+    send_buffer_size: 2097152
+    send_buffer_number: 0
+
+  timer:
+    tick_interval: 32ms
+    stop_timeout: 10s
+    stop_interval: 256ms
+
+  etcd:
+    enable: false
+
+  log:
+    level: debug
+    category:
+      - name: default
+        prefix: "[Log %L][%F %T.%f][%s:%n(%C)]: "
+        stacktrace:
+          min: error
+          max: fatal
+        sink:
+          - type: stderr
+            level:
+              min: debug
+              max: fatal
