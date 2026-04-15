@@ -2944,7 +2944,7 @@ func (n *Node) LogDebug(ep types.Endpoint, conn types.Connection, m *types.Messa
 		)
 	}
 
-	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelDebug, msg, args...)
+	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelDebug, msg, args)
 }
 
 func (n *Node) LogInfo(ep types.Endpoint, conn types.Connection, msg string, args ...any) {
@@ -2973,7 +2973,7 @@ func (n *Node) LogInfo(ep types.Endpoint, conn types.Connection, msg string, arg
 		slog.String("connection", connAddr),
 	)
 
-	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelInfo, msg, args...)
+	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelInfo, msg, args)
 }
 
 func (n *Node) LogError(ep types.Endpoint, conn types.Connection, status int, errcode error_code.ErrorType, msg string, args ...any) {
@@ -3004,5 +3004,5 @@ func (n *Node) LogError(ep types.Endpoint, conn types.Connection, status int, er
 		slog.String("error_code", errcode.String()),
 	)
 
-	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelError, msg, args...)
+	logger.LogInner(time.Now(), utils_log.GetCaller(1), n.GetContext(), slog.LevelError, msg, args)
 }
