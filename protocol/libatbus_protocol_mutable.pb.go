@@ -191,7 +191,7 @@ func (m *CryptoHandshakeData) MutableKdfType() []ATBUS_CRYPTO_KDF_TYPE {
 }
 
 // ===== ReverseIfNil methods for CryptoHandshakeData ===== Repeated =====
-func (m *CryptoHandshakeData) ReverseIfNilKdfType(l int32) []ATBUS_CRYPTO_KDF_TYPE {
+func (m *CryptoHandshakeData) ReverseIfNilKdfType(l int) []ATBUS_CRYPTO_KDF_TYPE {
 	if m.KdfType == nil {
 		m.KdfType = make([]ATBUS_CRYPTO_KDF_TYPE, 0, l)
 	}
@@ -202,6 +202,14 @@ func (m *CryptoHandshakeData) ReverseIfNilKdfType(l int32) []ATBUS_CRYPTO_KDF_TY
 func (m *CryptoHandshakeData) AppendKdfType(d ATBUS_CRYPTO_KDF_TYPE) {
 	if m.KdfType == nil {
 		m.KdfType = []ATBUS_CRYPTO_KDF_TYPE{}
+	}
+	m.KdfType = append(m.KdfType, d)
+}
+
+// ===== Append methods for CryptoHandshakeData ===== Repeated =====
+func (m *CryptoHandshakeData) AppendAndReverseKdfType(l int, d ATBUS_CRYPTO_KDF_TYPE) {
+	if m.KdfType == nil {
+		m.KdfType = make([]ATBUS_CRYPTO_KDF_TYPE, 0, l)
 	}
 	m.KdfType = append(m.KdfType, d)
 }
@@ -234,7 +242,7 @@ func (m *CryptoHandshakeData) MutableAlgorithms() []ATBUS_CRYPTO_ALGORITHM_TYPE 
 }
 
 // ===== ReverseIfNil methods for CryptoHandshakeData ===== Repeated =====
-func (m *CryptoHandshakeData) ReverseIfNilAlgorithms(l int32) []ATBUS_CRYPTO_ALGORITHM_TYPE {
+func (m *CryptoHandshakeData) ReverseIfNilAlgorithms(l int) []ATBUS_CRYPTO_ALGORITHM_TYPE {
 	if m.Algorithms == nil {
 		m.Algorithms = make([]ATBUS_CRYPTO_ALGORITHM_TYPE, 0, l)
 	}
@@ -245,6 +253,14 @@ func (m *CryptoHandshakeData) ReverseIfNilAlgorithms(l int32) []ATBUS_CRYPTO_ALG
 func (m *CryptoHandshakeData) AppendAlgorithms(d ATBUS_CRYPTO_ALGORITHM_TYPE) {
 	if m.Algorithms == nil {
 		m.Algorithms = []ATBUS_CRYPTO_ALGORITHM_TYPE{}
+	}
+	m.Algorithms = append(m.Algorithms, d)
+}
+
+// ===== Append methods for CryptoHandshakeData ===== Repeated =====
+func (m *CryptoHandshakeData) AppendAndReverseAlgorithms(l int, d ATBUS_CRYPTO_ALGORITHM_TYPE) {
+	if m.Algorithms == nil {
+		m.Algorithms = make([]ATBUS_CRYPTO_ALGORITHM_TYPE, 0, l)
 	}
 	m.Algorithms = append(m.Algorithms, d)
 }
@@ -480,7 +496,7 @@ func (m *CustomCommandData) MutableCommands() []*CustomCommandArgv {
 }
 
 // ===== ReverseIfNil methods for CustomCommandData ===== Repeated =====
-func (m *CustomCommandData) ReverseIfNilCommands(l int32) []*CustomCommandArgv {
+func (m *CustomCommandData) ReverseIfNilCommands(l int) []*CustomCommandArgv {
 	if m.Commands == nil {
 		m.Commands = make([]*CustomCommandArgv, 0, l)
 	}
@@ -491,6 +507,14 @@ func (m *CustomCommandData) ReverseIfNilCommands(l int32) []*CustomCommandArgv {
 func (m *CustomCommandData) AppendCommands(d *CustomCommandArgv) {
 	if m.Commands == nil {
 		m.Commands = []*CustomCommandArgv{}
+	}
+	m.Commands = append(m.Commands, d)
+}
+
+// ===== Append methods for CustomCommandData ===== Repeated =====
+func (m *CustomCommandData) AppendAndReverseCommands(l int, d *CustomCommandArgv) {
+	if m.Commands == nil {
+		m.Commands = make([]*CustomCommandArgv, 0, l)
 	}
 	m.Commands = append(m.Commands, d)
 }
@@ -675,7 +699,7 @@ func (m *ForwardData) MutableRouter() []uint64 {
 }
 
 // ===== ReverseIfNil methods for ForwardData ===== Repeated =====
-func (m *ForwardData) ReverseIfNilRouter(l int32) []uint64 {
+func (m *ForwardData) ReverseIfNilRouter(l int) []uint64 {
 	if m.Router == nil {
 		m.Router = make([]uint64, 0, l)
 	}
@@ -686,6 +710,14 @@ func (m *ForwardData) ReverseIfNilRouter(l int32) []uint64 {
 func (m *ForwardData) AppendRouter(d uint64) {
 	if m.Router == nil {
 		m.Router = []uint64{}
+	}
+	m.Router = append(m.Router, d)
+}
+
+// ===== Append methods for ForwardData ===== Repeated =====
+func (m *ForwardData) AppendAndReverseRouter(l int, d uint64) {
+	if m.Router == nil {
+		m.Router = make([]uint64, 0, l)
 	}
 	m.Router = append(m.Router, d)
 }
@@ -847,7 +879,7 @@ func (m *AccessData) MutableSignature() [][]byte {
 }
 
 // ===== ReverseIfNil methods for AccessData ===== Repeated =====
-func (m *AccessData) ReverseIfNilSignature(l int32) [][]byte {
+func (m *AccessData) ReverseIfNilSignature(l int) [][]byte {
 	if m.Signature == nil {
 		m.Signature = make([][]byte, 0, l)
 	}
@@ -858,6 +890,14 @@ func (m *AccessData) ReverseIfNilSignature(l int32) [][]byte {
 func (m *AccessData) AppendSignature(d []byte) {
 	if m.Signature == nil {
 		m.Signature = [][]byte{}
+	}
+	m.Signature = append(m.Signature, d)
+}
+
+// ===== Append methods for AccessData ===== Repeated =====
+func (m *AccessData) AppendAndReverseSignature(l int, d []byte) {
+	if m.Signature == nil {
+		m.Signature = make([][]byte, 0, l)
 	}
 	m.Signature = append(m.Signature, d)
 }
@@ -1271,7 +1311,7 @@ func (m *RegisterData) MutableChannels() []*ChannelData {
 }
 
 // ===== ReverseIfNil methods for RegisterData ===== Repeated =====
-func (m *RegisterData) ReverseIfNilChannels(l int32) []*ChannelData {
+func (m *RegisterData) ReverseIfNilChannels(l int) []*ChannelData {
 	if m.Channels == nil {
 		m.Channels = make([]*ChannelData, 0, l)
 	}
@@ -1282,6 +1322,14 @@ func (m *RegisterData) ReverseIfNilChannels(l int32) []*ChannelData {
 func (m *RegisterData) AppendChannels(d *ChannelData) {
 	if m.Channels == nil {
 		m.Channels = []*ChannelData{}
+	}
+	m.Channels = append(m.Channels, d)
+}
+
+// ===== Append methods for RegisterData ===== Repeated =====
+func (m *RegisterData) AppendAndReverseChannels(l int, d *ChannelData) {
+	if m.Channels == nil {
+		m.Channels = make([]*ChannelData, 0, l)
 	}
 	m.Channels = append(m.Channels, d)
 }
@@ -1324,7 +1372,7 @@ func (m *RegisterData) MutableSupportedChannelSchema() []string {
 }
 
 // ===== ReverseIfNil methods for RegisterData ===== Repeated =====
-func (m *RegisterData) ReverseIfNilSupportedChannelSchema(l int32) []string {
+func (m *RegisterData) ReverseIfNilSupportedChannelSchema(l int) []string {
 	if m.SupportedChannelSchema == nil {
 		m.SupportedChannelSchema = make([]string, 0, l)
 	}
@@ -1335,6 +1383,14 @@ func (m *RegisterData) ReverseIfNilSupportedChannelSchema(l int32) []string {
 func (m *RegisterData) AppendSupportedChannelSchema(d string) {
 	if m.SupportedChannelSchema == nil {
 		m.SupportedChannelSchema = []string{}
+	}
+	m.SupportedChannelSchema = append(m.SupportedChannelSchema, d)
+}
+
+// ===== Append methods for RegisterData ===== Repeated =====
+func (m *RegisterData) AppendAndReverseSupportedChannelSchema(l int, d string) {
+	if m.SupportedChannelSchema == nil {
+		m.SupportedChannelSchema = make([]string, 0, l)
 	}
 	m.SupportedChannelSchema = append(m.SupportedChannelSchema, d)
 }
@@ -1367,7 +1423,7 @@ func (m *RegisterData) MutableSupportedCompressionAlgorithm() []ATBUS_COMPRESSIO
 }
 
 // ===== ReverseIfNil methods for RegisterData ===== Repeated =====
-func (m *RegisterData) ReverseIfNilSupportedCompressionAlgorithm(l int32) []ATBUS_COMPRESSION_ALGORITHM_TYPE {
+func (m *RegisterData) ReverseIfNilSupportedCompressionAlgorithm(l int) []ATBUS_COMPRESSION_ALGORITHM_TYPE {
 	if m.SupportedCompressionAlgorithm == nil {
 		m.SupportedCompressionAlgorithm = make([]ATBUS_COMPRESSION_ALGORITHM_TYPE, 0, l)
 	}
@@ -1378,6 +1434,14 @@ func (m *RegisterData) ReverseIfNilSupportedCompressionAlgorithm(l int32) []ATBU
 func (m *RegisterData) AppendSupportedCompressionAlgorithm(d ATBUS_COMPRESSION_ALGORITHM_TYPE) {
 	if m.SupportedCompressionAlgorithm == nil {
 		m.SupportedCompressionAlgorithm = []ATBUS_COMPRESSION_ALGORITHM_TYPE{}
+	}
+	m.SupportedCompressionAlgorithm = append(m.SupportedCompressionAlgorithm, d)
+}
+
+// ===== Append methods for RegisterData ===== Repeated =====
+func (m *RegisterData) AppendAndReverseSupportedCompressionAlgorithm(l int, d ATBUS_COMPRESSION_ALGORITHM_TYPE) {
+	if m.SupportedCompressionAlgorithm == nil {
+		m.SupportedCompressionAlgorithm = make([]ATBUS_COMPRESSION_ALGORITHM_TYPE, 0, l)
 	}
 	m.SupportedCompressionAlgorithm = append(m.SupportedCompressionAlgorithm, d)
 }
