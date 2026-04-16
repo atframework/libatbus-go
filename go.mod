@@ -3,7 +3,7 @@ module github.com/atframework/libatbus-go
 go 1.25.1
 
 require (
-	github.com/atframework/atframe-utils-go v1.0.4-0.20260408101702-e8739e5210cc
+	github.com/atframework/atframe-utils-go v1.0.5-0.20260416024202-66c04636f055
 	github.com/spaolacci/murmur3 v1.1.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.47.0
