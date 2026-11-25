@@ -1,0 +1,31 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    depguard:
+      rules:
+        libatbus-layer-boundary:
+          desc: "libatbus-go may depend on atframe-utils-go (including detail/) but must not import libatapp-go or atsf4g-go"
+          files:
+            - "$all"
+          deny:
+            - pkg: "github.com/atframework/libatapp-go"
+              desc: "libatbus-go must stay independent of libatapp-go"
+            - pkg: "github.com/atframework/atsf4g-go"
+              desc: "libatbus-go must stay independent of atsf4g-go"
+
+  exclusions:
+    paths:
+      - .cache
+      - build
+
+run:
+  timeout: 5m

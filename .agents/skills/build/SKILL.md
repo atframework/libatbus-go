@@ -7,17 +7,15 @@ description: "Build libatbus-go, generate protobuf code, and manage dependencies
 
 ## Prerequisites
 
-- Go 1.25+
-- `protoc` (protobuf compiler)
-- `protoc-gen-go` (`go install google.golang.org/protobuf/cmd/protoc-gen-go@latest`)
-- `protoc-gen-mutable` (custom plugin, generates `*_mutable.pb.go` with Mutable/Clone/Merge extensions)
-- [go-task](https://taskfile.dev/) (recommended)
+- Go 1.27.4+ (pinned in `mise.toml`)
+- `protoc` (auto-downloaded into `.cache/atbuild/tools` if absent)
+- `atbuild`, `protoc-gen-go`, `protoc-gen-mutable` (pinned in `tools.mod`)
 
 ## Quick Commands
 
 ```bash
 # Generate protobuf code (recommended)
-task generate-protocol
+go tool -modfile tools.mod atbuild proto
 
 # Or run protoc directly
 cd protocol && protoc --go_out=. --mutable_out=. \
@@ -43,7 +41,7 @@ The protocol definition lives in `protocol/libatbus_protocol.proto`. Generated f
 The `generate.go` file at module root contains:
 
 ```go
-//go:generate task generate-protocol
+//go:generate go tool -modfile tools.mod atbuild proto
 ```
 
 So you can also run: `go generate ./...`
@@ -76,4 +74,4 @@ replace github.com/atframework/libatbus-go => ./atframework/libatbus-go
 | ------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `protoc-gen-mutable: not found` | Install the custom plugin from the parent repo's tools                                                |
 | Import cycle errors             | Check that `types/` does not import `impl/` (types defines interfaces, impl provides implementations) |
-| Stale generated code            | Run `task generate-protocol` and verify `protocol/*.pb.go` timestamps                                 |
+| Stale generated code            | Run `go tool -modfile tools.mod atbuild proto --force` and verify `protocol/*.pb.go` timestamps       |

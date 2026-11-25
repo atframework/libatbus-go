@@ -1,3 +1,3 @@
 package libatbus
 
-//go:generate task generate-protocol
+//go:generate go tool -modfile tools.mod atbuild proto

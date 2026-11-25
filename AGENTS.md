@@ -5,7 +5,7 @@ It provides cross-language interoperability with the C++ `libatbus` for building
 
 - **Module**: `github.com/atframework/libatbus-go`
 - **License**: MIT
-- **Language**: Go 1.25+
+- **Language**: Go 1.27+
 - **C++ reference**: `atsf4g-co/atframework/libatbus`
 
 ## Directory Structure
@@ -17,7 +17,7 @@ libatbus-go/
 ├── atbus_node.go                # Root-level node public API
 ├── libatbus_error.go            # Root-level error code mapping
 ├── libatbus_protocol.go         # Root-level protocol helpers
-├── generate.go                  # go:generate marker (task generate-protocol)
+├── generate.go                  # go:generate marker (go tool -modfile tools.mod atbuild proto)
 ├── buffer/                      # Buffer management (varint, ring buffer, static block)
 │   ├── buffer_algorithm.go
 │   ├── buffer_block.go
@@ -143,10 +143,10 @@ Go libatbus-go uses goroutines instead of a libuv event loop:
 ## Build & Code Generation
 
 ```bash
-# Generate protobuf code
-task generate-protocol
+# Generate protobuf code (cached via atbuild)
+go tool -modfile tools.mod atbuild proto
 
-# Build
+# Build (standalone check with GOWORK=off)
 go build ./...
 
 # Run all tests

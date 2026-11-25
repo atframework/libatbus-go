@@ -1,6 +1,6 @@
 module github.com/atframework/libatbus-go/sample/sample_usage_01
 
-go 1.25.1
+go 1.27.4
 
 require github.com/atframework/libatbus-go v0.0.0
 
