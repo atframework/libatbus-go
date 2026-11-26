@@ -9,7 +9,9 @@ tool (
 )
 
 require (
-	github.com/atframework/atframe-utils-go v1.0.5-0.20260416024202-66c04636f055
-	github.com/atframework/atframe-utils-go/buildkit v0.1.0
-	google.golang.org/protobuf v1.36.11
+	github.com/atframework/atframe-utils-go v1.0.5-0.20260416024202-66c04636f055 // indirect
+	github.com/atframework/atframe-utils-go/buildkit v0.0.0-20261125073917-01de2a20e478 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

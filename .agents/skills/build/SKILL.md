@@ -9,13 +9,18 @@ description: "Build libatbus-go, generate protobuf code, and manage dependencies
 
 - Go 1.27.4+ (pinned in `mise.toml`)
 - `protoc` (auto-downloaded into `.cache/atbuild/tools` if absent)
-- `atbuild`, `protoc-gen-go`, `protoc-gen-mutable` (pinned in `tools.mod`)
+- `atbuild`, `protoc-gen-go`, `protoc-gen-mutable` (pinned in `tools.mod` / `tools.sum`)
 
 ## Quick Commands
 
 ```bash
-# Generate protobuf code (recommended)
-go tool -modfile tools.mod atbuild proto
+# Generate protobuf code (recommended; GOWORK=off is required when a go.work is active)
+GOWORK=off go tool -modfile tools.mod atbuild proto
+# Windows PowerShell:
+# $env:GOWORK='off'; go tool -modfile tools.mod atbuild proto
+
+# Or via go generate (works in both standalone and go.work workspace modes)
+go generate ./...
 
 # Or run protoc directly
 cd protocol && protoc --go_out=. --mutable_out=. \
@@ -38,13 +43,17 @@ The protocol definition lives in `protocol/libatbus_protocol.proto`. Generated f
 | `libatbus_protocol.pb.go`         | `protoc-gen-go`      | Standard protobuf types                 |
 | `libatbus_protocol_mutable.pb.go` | `protoc-gen-mutable` | Mutable/Clone/Merge/Readonly extensions |
 
-The `generate.go` file at module root contains:
+The `generate.go` (`!windows`) and `generate_windows.go` (`windows`) files at module root invoke `atbuild proto` with `GOWORK=off` so `go generate ./...` works in both standalone and workspace (`go.work`) modes:
 
 ```go
-//go:generate go tool -modfile tools.mod atbuild proto
+// generate.go (!windows)
+//go:generate env GOWORK=off go tool -modfile tools.mod atbuild proto
+
+// generate_windows.go (windows)
+//go:generate cmd /c "set GOWORK=off&& go tool -modfile tools.mod atbuild proto"
 ```
 
-So you can also run: `go generate ./...`
+So you can run `go generate ./...` directly even when a `go.work` file is present.
 
 ## Module Path
 
@@ -74,4 +83,5 @@ replace github.com/atframework/libatbus-go => ./atframework/libatbus-go
 | ------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `protoc-gen-mutable: not found` | Install the custom plugin from the parent repo's tools                                                |
 | Import cycle errors             | Check that `types/` does not import `impl/` (types defines interfaces, impl provides implementations) |
-| Stale generated code            | Run `go tool -modfile tools.mod atbuild proto --force` and verify `protocol/*.pb.go` timestamps       |
+| `-modfile cannot be used in workspace mode` | Prefix `go tool -modfile` commands with `GOWORK=off` (or run `go generate ./...`) |
+| Stale generated code            | Run `GOWORK=off go tool -modfile tools.mod atbuild proto --force` and verify `protocol/*.pb.go` timestamps |

@@ -1,3 +1,5 @@
+//go:build !windows
+
 package libatbus
 
-//go:generate go tool -modfile tools.mod atbuild proto
+//go:generate env GOWORK=off go tool -modfile tools.mod atbuild proto

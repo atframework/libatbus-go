@@ -17,7 +17,8 @@ libatbus-go/
 ├── atbus_node.go                # Root-level node public API
 ├── libatbus_error.go            # Root-level error code mapping
 ├── libatbus_protocol.go         # Root-level protocol helpers
-├── generate.go                  # go:generate marker (go tool -modfile tools.mod atbuild proto)
+├── generate.go                  # go:generate marker (!windows: env GOWORK=off go tool -modfile tools.mod atbuild proto)
+├── generate_windows.go          # go:generate marker (windows: cmd /c set GOWORK=off&& go tool -modfile tools.mod atbuild proto)
 ├── buffer/                      # Buffer management (varint, ring buffer, static block)
 │   ├── buffer_algorithm.go
 │   ├── buffer_block.go
@@ -143,8 +144,13 @@ Go libatbus-go uses goroutines instead of a libuv event loop:
 ## Build & Code Generation
 
 ```bash
-# Generate protobuf code (cached via atbuild)
-go tool -modfile tools.mod atbuild proto
+# Generate protobuf code (cached via atbuild; GOWORK=off is required when a go.work is active)
+GOWORK=off go tool -modfile tools.mod atbuild proto
+# Windows PowerShell:
+# $env:GOWORK='off'; go tool -modfile tools.mod atbuild proto
+
+# Or via go generate (works in both standalone and go.work workspace modes)
+go generate ./...
 
 # Build (standalone check with GOWORK=off)
 go build ./...
