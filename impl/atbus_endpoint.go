@@ -479,32 +479,10 @@ func (e *Endpoint) AddPingTimer() {
 		return
 	}
 
-	// Self node doesn't need ping
-	if e.GetId() == e.owner.GetId() {
-		return
-	}
-
-	// Check if ping interval is valid
-	if e.owner.GetConfigure().PingInterval <= 0 {
-		return
-	}
-
-	// Don't add during GC reset
-	if e.owner.CheckFlag(types.NodeFlag_ResettingGc) {
-		return
-	}
-
 	e.ClearPingTimer()
-
-	if e.GetFlag(types.EndpointFlag_Resetting) {
-		return
+	if !e.GetFlag(types.EndpointFlag_Resetting) && e.owner.addPingTimer(e) {
+		e.SetFlag(types.EndpointFlag_HasPingTimer, true)
 	}
-
-	// Add to ping list - use type assertion to access internal method
-	nextPingTime := e.owner.GetTimerTick().Add(e.owner.GetConfigure().PingInterval)
-	e.owner.addPingTimer(e, nextPingTime)
-
-	e.SetFlag(types.EndpointFlag_HasPingTimer, true)
 }
 
 func (e *Endpoint) ClearPingTimer() {

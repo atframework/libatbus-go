@@ -80,6 +80,132 @@ func TestPollDispatchesQueuedSelfMessageAndIgnoresWriteNotifications(t *testing.
 	assert.False(t, n.CheckFlag(types.NodeFlag_InGcConnections))
 }
 
+func TestConnectingTimersExpireInRegistrationOrder(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	require.Zero(t, n.Start())
+
+	var expired []types.Connection
+	n.SetEventHandleOnInvalidConnection(func(_ types.Node, conn types.Connection, code error_code.ErrorType) error_code.ErrorType {
+		assert.Equal(t, error_code.EN_ATBUS_ERR_NODE_TIMEOUT, code)
+		expired = append(expired, conn)
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	})
+	start, timeout := n.GetTimerTick(), n.GetConfigure().FirstIdleTimeout
+	first := CreateConnection(n, "ipv4://127.0.0.1:10001", false)
+	require.NotNil(t, first)
+	n.Proc(start.Add(timeout / 2))
+	second := CreateConnection(n, "ipv4://127.0.0.1:10002", false)
+	require.NotNil(t, second)
+
+	n.Proc(start.Add(timeout))
+	require.Empty(t, expired)
+	require.Equal(t, 2, n.GetConnectionTimerSize())
+	n.Proc(start.Add(timeout + time.Nanosecond))
+	require.Len(t, expired, 1)
+	require.Same(t, first, expired[0])
+	require.Equal(t, 1, n.GetConnectionTimerSize())
+	require.Nil(t, n.getPendingConnection(first.GetOriginAddress()))
+	require.Same(t, second, n.getPendingConnection(second.GetOriginAddress()))
+
+	n.Proc(start.Add(2 * timeout))
+	require.Len(t, expired, 2)
+	require.Same(t, second, expired[1])
+	require.Zero(t, n.GetConnectionTimerSize())
+}
+
+func TestPingTimersServiceAllDuePeersBeforeRescheduledTimers(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	require.Zero(t, n.Start())
+
+	var pings []types.BusIdType
+	for _, id := range []types.BusIdType{2, 3} {
+		peer := NewNode()
+		require.Zero(t, peer.Init(id, nil))
+		t.Cleanup(func() { peer.Reset() })
+		require.Zero(t, peer.Start())
+		local := CreateEndpoint(n, id, int64(peer.GetPid()), peer.GetHostname())
+		remote := CreateEndpoint(peer, n.GetId(), int64(n.GetPid()), n.GetHostname())
+		require.Zero(t, n.AddEndpoint(local))
+		require.Zero(t, peer.AddEndpoint(remote))
+		toPeer, toNode := newCustomCommandLoopbackConnectionPair(n, peer)
+		require.True(t, local.AddConnection(toPeer, false))
+		require.True(t, remote.AddConnection(toNode, false))
+		peer.SetEventHandleOnPingEndpoint(func(receiver types.Node, _ types.Endpoint, _ *types.Message, _ *protocol.PingData) error_code.ErrorType {
+			pings = append(pings, receiver.GetId())
+			return error_code.EN_ATBUS_ERR_SUCCESS
+		})
+	}
+
+	interval := n.GetConfigure().PingInterval
+	firstSweep := n.GetTimerTick().Add(interval + time.Nanosecond)
+	n.Proc(firstSweep)
+	require.Equal(t, []types.BusIdType{2, 3}, pings)
+	n.Proc(firstSweep.Add(interval - time.Nanosecond))
+	require.Len(t, pings, 2)
+	n.Proc(firstSweep.Add(interval))
+	require.Equal(t, []types.BusIdType{2, 3, 2, 3}, pings)
+}
+
+func TestResetPendingConnectionsInRegistrationOrder(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	addresses := []string{"ipv4://127.0.0.1:10001", "ipv4://127.0.0.1:10002"}
+	for _, addr := range addresses {
+		require.NotNil(t, CreateConnection(n, addr, false))
+	}
+	var invalid []string
+	n.SetEventHandleOnInvalidConnection(func(_ types.Node, conn types.Connection, code error_code.ErrorType) error_code.ErrorType {
+		assert.Equal(t, error_code.EN_ATBUS_ERR_NODE_TIMEOUT, code)
+		invalid = append(invalid, conn.GetOriginAddress())
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	})
+	require.Zero(t, n.Reset())
+	require.Zero(t, n.GetConnectionTimerSize())
+	require.Zero(t, n.Reset())
+	require.Equal(t, addresses, invalid)
+}
+
+func TestResetBeforeInit(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Reset())
+	require.Zero(t, n.Init(1, nil))
+	require.Zero(t, n.Reset())
+}
+
+func TestResetCleansEndpointWithOnlyPingTimer(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	ep := CreateEndpoint(n, 2, int64(n.GetPid()), n.GetHostname())
+	ep.AddListenAddress("ipv4://127.0.0.1:10001")
+	ep.AddPingTimer()
+	require.True(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+	require.NotEmpty(t, ep.GetListenAddress())
+
+	require.Zero(t, n.Reset())
+	assert.False(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+	assert.Empty(t, ep.GetListenAddress())
+	assert.Zero(t, n.eventTimer.pingList.Len())
+}
+
+func TestDispatchedPingTimerClearsFlagWhenNotRescheduled(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	require.Zero(t, n.Start())
+	ep := CreateEndpoint(n, 2, int64(n.GetPid()), n.GetHostname())
+	ep.AddPingTimer()
+	require.True(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+
+	_, code := n.Proc(n.GetTimerTick().Add(n.GetConfigure().PingInterval))
+	require.Zero(t, code)
+	require.Zero(t, n.eventTimer.pingList.Len())
+	require.False(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+}
+
 func TestEndpointGCCancelsPingTimer(t *testing.T) {
 	n := NewNode()
 	require.Zero(t, n.Init(1, nil))
@@ -95,6 +221,20 @@ func TestEndpointGCCancelsPingTimer(t *testing.T) {
 	assert.Zero(t, n.eventTimer.pingList.Len())
 	n.Proc(now.Add(n.configure.PingInterval + time.Second))
 	assert.Zero(t, n.eventTimer.pingList.Len())
+}
+
+func TestRearmingPingAfterDisableClearsExistingTimer(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	ep := CreateEndpoint(n, 2, int64(n.GetPid()), n.GetHostname())
+	require.Zero(t, n.AddEndpoint(ep))
+	require.True(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+
+	n.GetConfigure().PingInterval = 0
+	ep.AddPingTimer()
+	require.False(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+	require.Zero(t, n.eventTimer.pingList.Len())
 }
 
 func TestReloadCompression_NilReceiverReturnsParams(t *testing.T) {

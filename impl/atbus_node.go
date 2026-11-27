@@ -47,10 +47,10 @@ type nodeEventTimer struct {
 	upstreamOpTimepoint     time.Time
 	upstreamOpRetryInterval time.Duration
 	pingListMu              sync.Mutex
-	pingList                types.TimerDescType[*Endpoint, *Endpoint]
+	pingList                *types.TimerDescType[*Endpoint, *Endpoint]
 	connectingListMu        sync.Mutex
 	connectingListByChannel map[string]*Connection
-	connectingListByPtr     types.TimerDescType[*Connection, *Connection]
+	connectingListByPtr     *types.TimerDescType[*Connection, *Connection]
 	pendingEndpointGcList   list.List
 	pendingConnectionGcList list.List
 }
@@ -333,9 +333,9 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 	// 集群隔离配置
 	n.ReloadSelfEndpoint(n.configure.Scope, n.configure.NamespaceName, n.configure.NodeLabels, n.configure.Gateway)
 	n.self.ClearPingTimer()
-	n.eventTimer.pingList = *utils_memory.NewLRUMap[*Endpoint, types.TimerDescPair[*Endpoint]](0)
+	n.eventTimer.pingList = utils_memory.NewLRUMap[*Endpoint, types.TimerDescPair[*Endpoint]](0)
 	n.eventTimer.connectingListByChannel = make(map[string]*Connection)
-	n.eventTimer.connectingListByPtr = *utils_memory.NewLRUMap[*Connection, types.TimerDescPair[*Connection]](0)
+	n.eventTimer.connectingListByPtr = utils_memory.NewLRUMap[*Connection, types.TimerDescPair[*Connection]](0)
 
 	// Initialize node route collection
 	n.nodeRoute.endpointInstance = make(map[types.BusIdType]*Endpoint)
@@ -656,7 +656,7 @@ func (n *Node) Reset() error_code.ErrorType {
 	// Clear connecting list
 	for {
 		n.eventTimer.connectingListMu.Lock()
-		key, pair, exists := n.eventTimer.connectingListByPtr.Front()
+		key, pair, exists := n.eventTimer.connectingListByPtr.Back()
 		if !exists {
 			n.eventTimer.connectingListMu.Unlock()
 			break
@@ -687,13 +687,19 @@ func (n *Node) Reset() error_code.ErrorType {
 	n.eventTimer.upstreamOpRetryInterval = 0
 
 	n.eventTimer.pingListMu.Lock()
+	pendingPings := n.eventTimer.pingList
+	n.eventTimer.pingList = nil
+	n.eventTimer.pingListMu.Unlock()
 	for {
-		_, _, exists := n.eventTimer.pingList.PopFront()
+		_, timer, exists := pendingPings.PopBack()
 		if !exists {
 			break
 		}
+		if ep := timer.Value; ep != nil {
+			ep.SetFlag(types.EndpointFlag_HasPingTimer, false)
+			ep.Reset()
+		}
 	}
-	n.eventTimer.pingListMu.Unlock()
 
 	if n.eventCancelFn != nil {
 		n.eventCancelFn()
@@ -773,7 +779,8 @@ func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 func (n *Node) processConnectingTimeout(now time.Time) {
 	for {
 		n.eventTimer.connectingListMu.Lock()
-		key, pair, exists := n.eventTimer.connectingListByPtr.Front()
+		// Put adds new timers at the front, so the oldest deadline is at the back.
+		key, pair, exists := n.eventTimer.connectingListByPtr.Back()
 		if !exists {
 			n.eventTimer.connectingListMu.Unlock()
 			break
@@ -862,25 +869,26 @@ func (n *Node) processUpstreamOperations(now time.Time) {
 func (n *Node) processPingTimers(now time.Time) {
 	for {
 		n.eventTimer.pingListMu.Lock()
-		_, pair, exists := n.eventTimer.pingList.Front()
+		_, pair, exists := n.eventTimer.pingList.Back()
 		if !exists {
 			n.eventTimer.pingListMu.Unlock()
 			break
 		}
 
 		if pair.Value == nil {
-			n.eventTimer.pingList.PopFront()
+			n.eventTimer.pingList.PopBack()
 			n.eventTimer.pingListMu.Unlock()
 			continue
 		}
 
-		if !pair.Timeout.Before(now) {
+		if pair.Timeout.After(now) {
 			n.eventTimer.pingListMu.Unlock()
 			break
 		}
 
 		ep := pair.Value
-		n.eventTimer.pingList.PopFront()
+		n.eventTimer.pingList.PopBack()
+		ep.SetFlag(types.EndpointFlag_HasPingTimer, false)
 		n.eventTimer.pingListMu.Unlock()
 
 		// Ping前检测有效性，超出最大首次空闲时间后还处于不可用状态（没有数据连接）需要回收
@@ -2405,7 +2413,7 @@ func (n *Node) AddEndpointGcList(ep types.Endpoint) {
 }
 
 // addPingTimer adds an endpoint to the ping timer list
-func (n *Node) addPingTimer(ep *Endpoint, nextPingTime time.Time) bool {
+func (n *Node) addPingTimer(ep *Endpoint) bool {
 	if n == nil || ep == nil {
 		return false
 	}
@@ -2424,11 +2432,14 @@ func (n *Node) addPingTimer(ep *Endpoint, nextPingTime time.Time) bool {
 	}
 
 	n.eventTimer.pingListMu.Lock()
+	defer n.eventTimer.pingListMu.Unlock()
+	if n.eventTimer.pingList == nil {
+		return false
+	}
 	n.eventTimer.pingList.Put(ep, types.TimerDescPair[*Endpoint]{
-		Timeout: nextPingTime,
+		Timeout: n.GetTimerTick().Add(n.configure.PingInterval),
 		Value:   ep,
 	})
-	n.eventTimer.pingListMu.Unlock()
 	return true
 }
 

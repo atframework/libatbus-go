@@ -92,8 +92,9 @@ C++ 用例与 Go 测试的对应关系见[测试映射表](tools/cpp_test_cases.
   `types.ParseCryptoAlgorithmName()` / `types.ParseCompressionAlgorithmName()`，
   以及根包公开入口 `ParseCryptoAlgorithmName()` /
   `ParseCompressionAlgorithmName()`。
-- ✅ Go `processConnectingTimeout()` 已改为在 `Reset()` 后检查当前 front entry 是否仍为原定时项，
-  仅在需要保护性清理时再触发额外回调，与 C++ timeout 路径保持单回调语义。
+- ✅ 连接超时和端点 ping 均从定时器队列中最早登记的一项开始处理。连接超过截止时间后，
+  节点先移除定时项，再重置连接，避免重入时重复触发 `OnInvalidConnection`。
+  端点 ping 在到达截止时间时触发，重新排期后继续处理本轮其余已到期的端点。
 
 ---
 
