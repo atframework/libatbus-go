@@ -88,10 +88,8 @@ func (b *BufferBlock) Pop(s int) []byte {
 		return nil
 	}
 
-	if b.used+s > len(b.data) {
-		b.used = len(b.data)
-	} else {
-		b.used += s
+	if s > 0 {
+		b.used += min(s, len(b.data)-b.used)
 	}
 
 	return b.Data()

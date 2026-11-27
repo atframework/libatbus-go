@@ -17,6 +17,56 @@ import (
 	types "github.com/atframework/libatbus-go/types"
 )
 
+func TestEndpointDataConnectionSkipsPendingConnection(t *testing.T) {
+	var n Node
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	target := CreateEndpoint(&n, 2, 0, "peer")
+	pending := CreateConnection(&n, "ipv4://127.0.0.1:10101", false)
+	connected := CreateConnection(&n, "ipv4://127.0.0.1:10102", false)
+	pending.setStatus(types.ConnectionState_Connecting)
+	connected.setStatus(types.ConnectionState_Connected)
+	require.True(t, target.AddConnection(pending, true))
+	require.Nil(t, n.self.GetDataConnection(target, false))
+	require.True(t, target.AddConnection(connected, true))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, n.AddEndpoint(target))
+	require.Same(t, connected, n.self.GetDataConnection(target, false))
+}
+
+func TestNodeTopologyRelationReportsNextHop(t *testing.T) {
+	var n Node
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, n.Init(0x12345678, nil))
+	t.Cleanup(func() { n.Reset() })
+	registry := n.GetTopologyRegistry()
+	require.True(t, registry.UpdatePeer(n.GetId(), 0, makeTopologyData(1, "parent", nil)))
+	for _, id := range []types.BusIdType{0x12340000, 0x1234ffff} {
+		require.True(t, registry.UpdatePeer(id, n.GetId(), makeTopologyData(2, "child", nil)))
+		rel, via := n.GetTopologyRelation(id)
+		require.Equal(t, types.TopologyRelationType_ImmediateDownstream, rel)
+		require.NotNil(t, via)
+		require.Equal(t, id, via.GetBusId())
+	}
+	rel, via := n.GetTopologyRelation(n.GetId())
+	require.Equal(t, types.TopologyRelationType_Self, rel)
+	require.NotNil(t, via)
+	require.Equal(t, n.GetId(), via.GetBusId())
+	rel, via = n.GetTopologyRelation(0x12350000)
+	require.Equal(t, types.TopologyRelationType_Invalid, rel)
+	require.Nil(t, via)
+}
+
+func TestTopologyPassiveUpstreamPromotedBeforeChildRemoval(t *testing.T) {
+	registry := CreateTopologyRegistry()
+	require.True(t, registry.UpdatePeer(2, 1, makeTopologyData(2, "child", nil)))
+	parent := registry.GetPeer(1)
+	require.NotNil(t, parent)
+	require.True(t, registry.UpdatePeer(1, 0, makeTopologyData(1, "parent", nil)))
+	registry.RemovePeer(2)
+	require.Nil(t, registry.GetPeer(2))
+	require.Same(t, parent, registry.GetPeer(1))
+	require.False(t, parent.ContainsDownstream(2))
+}
+
 func TestCreateEndpointInitializesOwnerAndMetadata(t *testing.T) {
 	// Arrange
 	var n Node

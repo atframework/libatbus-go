@@ -84,6 +84,7 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 	}
 
 	// Filesystem sockets need path locking and cleanup.
+	var lockFile *os.File
 	if network == "pipe" && !IsNativePipePath(address) {
 		// Resolve to absolute path for consistency
 		absPath, err := filepath.Abs(address)
@@ -94,46 +95,43 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 		if !c.conf.OverwriteListenPath {
 			// Acquire file lock to prevent concurrent listen
 			lockPath := address + ".lock"
-			lockFile, lockOk := tryFlockFile(lockPath)
+			var lockOk bool
+			lockFile, lockOk = tryFlockFile(lockPath)
 			if !lockOk {
 				return error_code.EN_ATBUS_ERR_PIPE_LOCK_PATH_FAILED
-			}
-			if lockFile != nil {
-				c.mu.Lock()
-				c.addressLocks[addr] = lockFile
-				c.mu.Unlock()
 			}
 		}
 
 		// Remove existing socket file if present
 		if _, statErr := os.Stat(address); statErr == nil {
 			if removeErr := os.Remove(address); removeErr != nil {
-				// Unlock if we locked
-				c.mu.Lock()
-				if lockFile, exists := c.addressLocks[addr]; exists {
-					unlockFlockFile(lockFile)
-					delete(c.addressLocks, addr)
-				}
-				c.mu.Unlock()
+				unlockFlockFile(lockFile)
 				return error_code.EN_ATBUS_ERR_PIPE_REMOVE_FAILED
 			}
 		}
 	}
 
+	// libuv binds the IPv6 wildcard with IPV6_V6ONLY disabled.
+	if network == "tcp6" && net.ParseIP(parsedAddr.Host).IsUnspecified() {
+		network = "tcp"
+	}
 	listener, err := listenStream(network, address)
 	if err != nil {
-		// Unlock if we locked
-		c.mu.Lock()
-		if lockFile, exists := c.addressLocks[addr]; exists {
-			unlockFlockFile(lockFile)
-			delete(c.addressLocks, addr)
-		}
-		c.mu.Unlock()
+		unlockFlockFile(lockFile)
 		return error_code.EN_ATBUS_ERR_SOCK_BIND_FAILED
 	}
 
 	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		listener.Close()
+		unlockFlockFile(lockFile)
+		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
+	}
 	c.listeners[addr] = listener
+	if lockFile != nil {
+		c.addressLocks[addr] = lockFile
+	}
 	c.mu.Unlock()
 
 	// Start accepting connections in a goroutine
@@ -178,6 +176,9 @@ func (c *IoStreamChannel) Connect(addr string) (types.IoStreamConnection, error_
 
 	// Create connection wrapper
 	ioConn := c.createConnection(conn, parsedAddr, IoStreamConnectionFlagConnect)
+	if ioConn == nil {
+		return nil, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
+	}
 
 	// Fire connected callback
 	c.fireCallback(IoStreamCallbackEventTypeConnected, ioConn, 0)
@@ -282,14 +283,13 @@ func (c *IoStreamChannel) Close() error_code.ErrorType {
 		unlockFlockFile(lockFile)
 		delete(c.addressLocks, addr)
 	}
-	c.mu.Unlock()
 
-	// Close all connections
-	c.mu.Lock()
+	// Detach the pool before closing transports or invoking callbacks.
 	connections := make([]*IoStreamConnection, 0, len(c.connections))
 	for _, conn := range c.connections {
 		connections = append(connections, conn)
 	}
+	clear(c.connections)
 	c.mu.Unlock()
 
 	for _, conn := range connections {
@@ -350,6 +350,9 @@ func (c *IoStreamChannel) acceptLoop(listener net.Listener, listenAddr *channel_
 		}
 
 		ioConn := c.createConnection(conn, parsedAddr, IoStreamConnectionFlagAccept)
+		if ioConn == nil {
+			return
+		}
 
 		// Fire accepted callback
 		c.fireCallback(IoStreamCallbackEventTypeAccepted, ioConn, 0)
@@ -437,7 +440,7 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 				if copyLen > remaining {
 					copyLen = remaining
 				}
-				copy(conn.readLargeFrame.buffer[conn.readLargeFrame.writePos:], incoming[:copyLen])
+				conn.readLargeFrame.buffer = append(conn.readLargeFrame.buffer[:conn.readLargeFrame.writePos], incoming[:copyLen]...)
 				conn.readLargeFrame.writePos += copyLen
 				incoming = incoming[copyLen:]
 
@@ -511,28 +514,9 @@ func (c *IoStreamChannel) processReadHeadFrames(conn *IoStreamConnection) bool {
 			payloadStart := buffStart + HashSize + vintSize
 			payload := conn.readHead.buffer[payloadStart : payloadStart+int(msgLen)]
 
-			// Verify hash
-			expectedHash := binary.LittleEndian.Uint32(
-				conn.readHead.buffer[buffStart : buffStart+HashSize])
-			actualHash := CalculateHash(payload)
-
-			if actualHash != expectedHash {
-				count := atomic.AddUint64(&conn.checkHashFailedCount, 1)
-				atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
-				if count > c.conf.MaxReadCheckHashFailedCount {
-					isFree = true
-				}
-			} else if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
-				count := atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
-				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-				if count > c.conf.MaxReadCheckBlockSizeFailedCount {
-					isFree = true
-				}
-			} else {
-				// Fire received callback.
-				// The payload is a slice into the static head buffer and is valid
-				// only for the duration of this synchronous callback.
-				c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, 0, payload)
+			expectedHash := binary.LittleEndian.Uint32(conn.readHead.buffer[buffStart:])
+			if c.deliverFrame(conn, expectedHash, payload) {
+				isFree = true
 			}
 
 			buffStart += totalFrameSize
@@ -541,24 +525,28 @@ func (c *IoStreamChannel) processReadHeadFrames(conn *IoStreamConnection) bool {
 			break
 		} else {
 			// Frame exceeds static head buffer capacity - use large frame path.
-			// Check message size limit before allocating.
-			if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
+			// The receive pool bounds frame storage. The per-message limit is
+			// reported to callbacks once the entire payload has arrived.
+			largeBufSize := HashSize + int(msgLen)
+			if c.conf.ReceiveBufferMaxSize > 0 && uint64(largeBufSize) > c.conf.ReceiveBufferMaxSize {
 				atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
 				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-				isFree = true
-				break
+				c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, int32(error_code.EN_ATBUS_ERR_INVALID_SIZE), conn.readHead.buffer[buffStart:buffStart+buffLeftLen])
+				return true
 			}
-
-			// Allocate dynamic buffer: [hash:4][payload:msgLen]
-			largeBufSize := HashSize + int(msgLen)
-			largeBuf := make([]byte, largeBufSize)
+			remainingPayloadBytes := buffLeftLen - HashSize - vintSize
+			capacity := largeBufSize
+			if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
+				// Grow an oversized frame only as bytes arrive from the peer.
+				capacity = HashSize + remainingPayloadBytes
+			}
+			largeBuf := make([]byte, HashSize+remainingPayloadBytes, capacity)
 
 			// Copy hash from head buffer
 			copy(largeBuf[0:HashSize],
 				conn.readHead.buffer[buffStart:buffStart+HashSize])
 
 			// Copy remaining payload data from head buffer (data after the varint)
-			remainingPayloadBytes := buffLeftLen - HashSize - vintSize
 			if remainingPayloadBytes > 0 {
 				copy(largeBuf[HashSize:],
 					conn.readHead.buffer[buffStart+HashSize+vintSize:buffStart+buffLeftLen])
@@ -593,10 +581,10 @@ func (c *IoStreamChannel) processCompleteLargeFrame(conn *IoStreamConnection) bo
 		return false
 	}
 
-	payload := lf.buffer[HashSize : HashSize+lf.msgLen]
+	return c.deliverFrame(conn, binary.LittleEndian.Uint32(lf.buffer[:HashSize]), lf.buffer[HashSize:HashSize+lf.msgLen])
+}
 
-	// Verify hash
-	expectedHash := binary.LittleEndian.Uint32(lf.buffer[0:HashSize])
+func (c *IoStreamChannel) deliverFrame(conn *IoStreamConnection, expectedHash uint32, payload []byte) bool {
 	actualHash := CalculateHash(payload)
 
 	if actualHash != expectedHash {
@@ -608,13 +596,11 @@ func (c *IoStreamChannel) processCompleteLargeFrame(conn *IoStreamConnection) bo
 		return false
 	}
 
-	if c.conf.ReceiveBufferLimitSize > 0 && uint64(lf.msgLen) > c.conf.ReceiveBufferLimitSize {
+	if c.conf.ReceiveBufferLimitSize > 0 && uint64(len(payload)) > c.conf.ReceiveBufferLimitSize {
 		count := atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
 		atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-		if count > c.conf.MaxReadCheckBlockSizeFailedCount {
-			return true
-		}
-		return false
+		c.fireCallbackWithData(IoStreamCallbackEventTypeReceived, conn, int32(error_code.EN_ATBUS_ERR_INVALID_SIZE), payload)
+		return count > c.conf.MaxReadCheckBlockSizeFailedCount
 	}
 
 	// Fire received callback
@@ -829,6 +815,11 @@ func (c *IoStreamChannel) createConnection(conn net.Conn, addr *channel_utility.
 	}
 
 	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		conn.Close()
+		return nil
+	}
 	c.connections[conn] = ioConn
 	c.mu.Unlock()
 

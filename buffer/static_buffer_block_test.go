@@ -166,37 +166,35 @@ func TestStaticBufferBlockNilSafety(t *testing.T) {
 	block.Reset()
 }
 
-func TestMimallocPaddingSize(t *testing.T) {
-	// Test: Size padding follows mimalloc patterns
-	testCases := []struct {
-		input    int
-		expected int
-	}{
-		{0, 8},        // minimum allocation
-		{1, 8},        // tiny: align to 8
-		{7, 8},        // tiny: align to 8
-		{8, 8},        // tiny: exact 8
-		{9, 16},       // tiny: align to 8
-		{64, 64},      // tiny: exact 64
-		{65, 80},      // small: align to 16
-		{100, 112},    // small: align to 16
-		{512, 512},    // small: exact 512
-		{8192, 8192},  // medium boundary
-		{8193, 12288}, // large: align to 4KB
-		{10000, 12288},
-	}
-
-	for _, tc := range testCases {
-		result := MimallocPaddingSize(tc.input)
-		assert.GreaterOrEqual(t, result, tc.input, "MimallocPaddingSize(%d) should be >= input", tc.input)
-		// Verify alignment patterns
-		if tc.input <= 64 && tc.input > 0 {
-			assert.Equal(t, 0, result%8, "Tiny sizes should be 8-byte aligned")
-		} else if tc.input > 64 && tc.input <= 512 {
-			assert.Equal(t, 0, result%16, "Small sizes should be 16-byte aligned")
-		} else if tc.input > 8192 {
-			assert.Equal(t, 0, result%4096, "Large sizes should be 4KB aligned")
+// Sweep every class transition and check the same overhead limits as the C++ allocator.
+func TestMimallocPaddingProperties(t *testing.T) {
+	prev := 0
+	for size := 0; size <= 100000; size++ {
+		padded := MimallocPaddingSize(size)
+		align := 8
+		if size > 64 && size <= 512 {
+			align = 16
 		}
+		if size > 8192 {
+			align = 4096
+		}
+		if padded < size || padded < prev || padded%align != 0 || (size >= 600 && size <= 8000 && padded >= 2*size) {
+			t.Fatalf("padding(%d) = %d, previous %d, alignment %d", size, padded, prev, align)
+		}
+		prev = padded
+	}
+}
+
+func TestMimallocPaddingSize(t *testing.T) {
+	for _, tc := range []struct{ input, expected int }{
+		{0, 8}, {1, 8}, {7, 8}, {8, 8}, {9, 16}, {16, 16},
+		{17, 24}, {24, 24}, {25, 32}, {32, 32}, {49, 56}, {57, 64}, {64, 64},
+		{65, 80}, {80, 80}, {81, 96}, {100, 112}, {128, 128}, {256, 256},
+		{481, 496}, {497, 512}, {512, 512}, {8192, 8192},
+		{8193, 12288}, {9000, 12288}, {10000, 12288}, {12288, 12288},
+		{12289, 16384}, {16384, 16384}, {1 << 20, 1 << 20}, {1<<20 + 1, 1<<20 + 4096},
+	} {
+		assert.Equal(t, tc.expected, MimallocPaddingSize(tc.input), "MimallocPaddingSize(%d)", tc.input)
 	}
 }
 

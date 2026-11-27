@@ -834,30 +834,34 @@ func TestNodeMsgParity_PingPong(t *testing.T) {
 			node2.IsEndpointAvailable(node1.GetId())
 	}, &upstream, &node1, &node2)
 
-	// Advance the timers and dispatch queued I/O until the upstream pong arrives.
-	ep1u, ok := node1.GetEndpoint(upstream.GetId()).(*Endpoint)
-	require.True(t, ok)
-	oldPong := pongCount
-	procTime := time.Now()
-	for tickCount := 0; ep1u.GetStatisticLastPong().IsZero() && tickCount < 1000; tickCount++ {
-		procTime = procTime.Add(80 * time.Millisecond)
-		node1.Poll()
-		node2.Poll()
-		upstream.Poll()
-		node1.Proc(procTime)
-		node2.Proc(procTime)
-		upstream.Proc(procTime)
-		if tickCount%12 == 0 {
-			time.Sleep(1 * time.Millisecond) // yield to goroutines
+	base := time.Now()
+	startPong, startPing := pongCount, pingCount
+	elapsed := time.Duration(0)
+	for pongCount-startPong < 40 && elapsed < 16*time.Second {
+		elapsed += 80 * time.Millisecond
+		for _, n := range []*Node{&node1, &node2, &upstream} {
+			n.Proc(base.Add(elapsed))
+		}
+		// Drain I/O without advancing the protocol clock while the goroutines run.
+		for range 3 {
+			for _, n := range []*Node{&node1, &node2, &upstream} {
+				n.Poll()
+			}
+			time.Sleep(time.Millisecond)
 		}
 	}
-
-	// Verify pong counts — with multiple connections over simulated time, expect pong activity.
-	// The exact count depends on connection establishment timing, so we use a relaxed lower bound.
-	assert.Greater(t, pongCount-oldPong, 0, "Expected at least some pongs")
-	assert.Greater(t, pingCount, 0, "Expected at least some pings")
-
-	assert.False(t, ep1u.GetStatisticLastPong().IsZero(), "last_pong should be set on node1 for upstream")
+	pongs, pings := pongCount-startPong, pingCount-startPing
+	ticks := int(elapsed / time.Second)
+	require.GreaterOrEqual(t, pongs, 40)
+	require.GreaterOrEqual(t, pongs, 4*ticks-8)
+	require.LessOrEqual(t, pongs, 4*ticks+8)
+	require.LessOrEqual(t, pings, pongs+6)
+	require.LessOrEqual(t, pongs, pings+8)
+	for _, pair := range [][2]*Node{{&node2, &node1}, {&node1, &node2}, {&node1, &upstream}, {&upstream, &node1}} {
+		ep := pair[0].GetEndpoint(pair[1].GetId())
+		require.NotNil(t, ep)
+		require.False(t, ep.GetStatisticLastPong().IsZero())
+	}
 }
 
 // TestNodeMsgParity_TransferAndConnect mirrors C++ atbus_node_msg::transfer_and_connect.

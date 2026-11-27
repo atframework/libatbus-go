@@ -2616,7 +2616,23 @@ func TestCrossLangTestDataIntegrity(t *testing.T) {
 	// Verify protocol version
 	assert.Equal(t, 3, index.ProtocolVersion, "Protocol version should be 3")
 
-	// Verify all files listed in index exist
+	// Rebuild the expected index from the generated files, including orphaned pairs.
+	entries, err := os.ReadDir("testdata")
+	require.NoError(t, err)
+	var generated, listed []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "index.json" && (filepath.Ext(name) == ".json" || filepath.Ext(name) == ".bytes") {
+			generated = append(generated, name)
+		}
+	}
+	for _, tf := range index.TestFiles {
+		require.Equal(t, tf.Name+".json", tf.Metadata)
+		require.Equal(t, tf.Name+".bytes", tf.Binary)
+		listed = append(listed, tf.Metadata, tf.Binary)
+	}
+	require.ElementsMatch(t, generated, listed)
+
 	for _, tf := range index.TestFiles {
 		t.Run(tf.Name, func(t *testing.T) {
 			// Check binary file exists
@@ -2740,6 +2756,11 @@ func TestCrossLangAllIndexVectorsUnpack(t *testing.T) {
 				assert.Equal(t, metadata.Expected.BusID, reg.GetBusId())
 				assert.Equal(t, metadata.Expected.PID, reg.GetPid())
 				assert.Equal(t, metadata.Expected.Hostname, reg.GetHostname())
+				channels := make([]string, 0, len(reg.GetChannels()))
+				for _, channel := range reg.GetChannels() {
+					channels = append(channels, channel.GetAddress())
+				}
+				require.Equal(t, metadata.Expected.Channels, channels)
 			case "node_register_rsp":
 				reg := body.GetNodeRegisterRsp()
 				require.NotNil(t, reg)
@@ -2749,6 +2770,23 @@ func TestCrossLangAllIndexVectorsUnpack(t *testing.T) {
 			default:
 				t.Fatalf("Unexpected body_type %q in %s", metadata.BodyType, tf.Name)
 			}
+
+			// Generate a fresh outbound frame with the fixture's negotiated algorithms.
+			// Headers contain per-message IVs and codecs may produce different compressed bytes.
+			outgoing := types.NewMessage()
+			proto.Merge(outgoing.MutableBody(), body)
+			proto.Merge(outgoing.MutableHead(), head)
+			outgoing.MutableHead().Crypto = nil
+			outgoing.MutableHead().Compression = nil
+			alg := protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE(metadata.CompressionAlgorithmType)
+			require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ctx.UpdateCompressionAlgorithm([]protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE{alg}))
+			packed, code := ctx.PackMessage(outgoing, head.GetVersion(), 1024*1024)
+			require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+			regenerated := types.NewMessage()
+			require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ctx.UnpackMessage(regenerated, packed.UsedSpan(), 1024*1024))
+			require.Equal(t, head.GetCrypto().GetAlgorithm(), regenerated.GetHead().GetCrypto().GetAlgorithm())
+			require.Equal(t, head.GetCompression().GetType(), regenerated.GetHead().GetCompression().GetType())
+			require.True(t, proto.Equal(body, regenerated.GetBody()))
 		})
 	}
 }
@@ -3140,6 +3178,62 @@ func TestConnectionContextHandshakeWriteSelfPublicKey(t *testing.T) {
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING, errCode)
 	})
+}
+
+// Negotiate each supported pair and send different protobuf bodies in both directions.
+func TestConnectionContextBidirectionalCryptoMatrix(t *testing.T) {
+	covered := make(map[[2]int32]bool)
+	for _, curve := range allKeyExchangeAlgorithms() {
+		for _, cipher := range allCipherAlgorithms() {
+			covered[[2]int32{int32(curve.enumVal), int32(cipher.enumVal)}] = true
+			t.Run(curve.name+"/"+cipher.name, func(t *testing.T) {
+				client, server := NewConnectionContext(curve.enumVal), NewConnectionContext(curve.enumVal)
+				offer, reply := &protocol.CryptoHandshakeData{}, &protocol.CryptoHandshakeData{}
+				allowed := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{cipher.enumVal}
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeGenerateSelfKey(0))
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeWriteSelfPublicKey(offer, allowed))
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeGenerateSelfKey(offer.GetSequence()))
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeReadPeerKey(offer, allowed, true))
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeWriteSelfPublicKey(reply, allowed))
+				require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeReadPeerKey(reply, allowed, false))
+				server.ConfirmHandshake(reply.GetSequence())
+				for _, response := range []bool{false, true} {
+					tx, rx := client, server
+					msg := types.NewMessage()
+					if response {
+						tx, rx = server, client
+						msg.MutableBody().MutableDataTransformRsp().Content = []byte("server response")
+					} else {
+						msg.MutableBody().MutableDataTransformReq().Content = []byte("client request")
+					}
+					packed, code := tx.PackMessage(msg, 3, 1024)
+					require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+					got := types.NewMessage()
+					require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, rx.UnpackMessage(got, packed.UsedSpan(), 1024))
+					require.Equal(t, cipher.enumVal, got.GetHead().GetCrypto().GetAlgorithm())
+					require.True(t, proto.Equal(msg.GetBody(), got.GetBody()))
+				}
+			})
+		}
+	}
+	for curve, curveName := range protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_name {
+		for cipher, cipherName := range protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_name {
+			if curve != 0 && cipher != 0 {
+				require.Contains(t, covered, [2]int32{curve, cipher}, "%s/%s", curveName, cipherName)
+			}
+		}
+	}
+}
+
+func TestConnectionContextHandshakeRejectsDisjointCiphers(t *testing.T) {
+	curve := protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_SECP256R1
+	client, server := NewConnectionContext(curve), NewConnectionContext(curve)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeGenerateSelfKey(0))
+	hello := &protocol.CryptoHandshakeData{}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeWriteSelfPublicKey(hello, []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM}))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeGenerateSelfKey(hello.GetSequence()))
+	require.Equal(t, error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_NO_AVAILABLE_ALGORITHM, server.HandshakeReadPeerKey(hello, []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20}, true))
+	require.False(t, server.IsHandshakeDone())
 }
 
 func TestConnectionContextHandshakeReadPeerKey(t *testing.T) {

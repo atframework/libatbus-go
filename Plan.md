@@ -10,7 +10,7 @@
 > - 正确性、跨语言互通、主要对外接口一致性优先；
 > - 已存在的能力不再误列为“缺失项”。
 
-单独的单元测试执行计划见 `UnitTestPlan.md`。
+C++ 用例与 Go 测试的对应关系见[测试映射表](tools/cpp_test_cases.tsv)。
 
 ---
 
@@ -171,39 +171,20 @@
 
 ---
 
-## 六、单元测试计划摘要
+## 六、单元测试验证
 
-详细执行计划见 `UnitTestPlan.md`。这里仅保留最重要的结论：
+在本模块目录运行 `go test -count=1 -json ./... > windows.jsonl`；在 Linux 上运行
+`go test -race -count=1 -json ./... > linux.jsonl`。把两份结果传给检查脚本：
 
-- 现有 Go 测试已经覆盖 `buffer`、`channel/io_stream`、`channel/utility`、
-  `error_code`、`topology`、`message_handle`、`connection_context` 等模块；
-- ✅ `Node`、`Endpoint`、`Connection` 的测试空洞已补齐，各有独立测试文件；
-- C++ 基准 case 计数：
-  - `atbus_node_setup_test.cpp`：**3** 个 case；Go 侧有 **5** 个 impl 测试 + 根包 direct helper tests，
-    `crypto_algorithms` / `compression_algorithms` 已覆盖 C++ `parse_*` helper parity 与语义校验；
-  - `atbus_endpoint_test.cpp`：**5** 个 case；Go 侧覆盖分散在
-    `impl/atbus_endpoint_test.go`、`impl/atbus_topology_test.go` 与
-    `channel/utility/channel_utility_test.go`，不能简单视为“3 个 dedicated tests 即 1:1 等价”；
-  - `atbus_message_handler_test.cpp`：**19** 个 case；
-  - `atbus_node_msg_test.cpp`：**23** 个 case（含 crypto_config 7 个、multi_level_route 2 个、transfer_failed 2 个），
-    Go 侧已全部覆盖（`atbus_node_msg_test.go` 15 项 + `atbus_node_msg_extended_test.go` 11 项 = 26 项）；
-  - `atbus_node_reg_test.cpp`：**21** 个 case，其中 `mem_and_send`、`shm_and_send`
-    不在 Go 范围内，因此要求覆盖 **19** 个 case；
-  - `atbus_node_relationship_test.cpp`：包含 `basic_test`；
-  - `atbus_node_reg_test.cpp`：包含 `reg_pc_failed_with_subnet_mismatch`。
+```sh
+python tools/check_cpp_test_coverage.py /path/to/libatbus --results windows.jsonl linux.jsonl
+```
 
-已新增的测试文件：
+脚本读取 C++ 的 `test/case`、双方的协议测试向量和 Go 测试结果，检查每个映射的用例及所属包是否至少在一个平台通过。
+C++ 基线 `d8b2887c` 有 211 个用例声明。20 个专测内存或共享内存通道，另有一个停用的 FlatBuffers 用例，其余 190 个流程均有 Go 测试。
 
-- `impl/atbus_node_regression_test.go`：17 项测试兜住所有 P0 Bug；
-- `impl/atbus_connection_test.go`：7 项测试覆盖连接生命周期；
-- `impl/atbus_endpoint_test.go`：3 项测试覆盖端点基本行为；
-- `impl/atbus_node_setup_test.go`：5 项测试覆盖配置 / 算法 setup；
-- `impl/atbus_node_relationship_test.go`：3 项测试覆盖关系与端点增删生命周期；
-- `impl/atbus_node_reg_test.go`：19 项测试覆盖注册 / 拓扑 / 超时矩阵；
-- `impl/atbus_node_msg_test.go`：15 项测试覆盖消息收发 / loopback / 转发；
-- `impl/atbus_node_msg_extended_test.go`：11 项测试覆盖多级拓扑路由 / 转发失败 / 加密集成（crypto config 矩阵）；
-- `error_code/libatbus_error_test.go` 与现有 `connection_context` /
-  `message_handle` 测试做定向补强。
+Go 通过子进程验证 Unix 监听锁在 exec 时关闭、父进程保有锁及关闭后可重新获取锁。
+仅 fork 后继续操作继承对象属于 C++ 运行时场景。宽字符和线程局部缓存按 Go 返回的文本内容与并发稳定性验证，空 DH 指针按 Go 密钥交换不可用时的回退行为验证。
 
 ---
 
@@ -246,7 +227,7 @@
 | ------ | ------ |
 | 1. 全部 P0 问题被修复并有对应回归测试 | ✅ 已达成 |
 | 2. `Node` / `Endpoint` / `Connection` 拥有独立测试文件 | ✅ 已达成 |
-| 3. `UnitTestPlan.md` 中全部非 `mem://` / `shm://` C++ 场景有 Go 侧 traceability | ✅ 已达成 |
+| 3. C++ 的全部适用流程可追溯到 Go 测试 | ✅ 由测试映射表和检查脚本核验 |
 | 4. 跨语言算法列表与行为完整对齐或有明确结论 | ✅ 全部算法均有实现与跨语言向量（含纯 ChaCha20） |
 | 5. 根包公开 API 的创建与删除路径对外可用、可测试 | ✅ 已达成 |
 | 6. 已确认的非 `mem://` / `shm://` API/流程差异（`parse_*` helper、`OnInvalidConnection` timeout 双回调）已关闭 | ✅ 已达成 |

@@ -1,9 +1,11 @@
 package libatbus_buffer
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // =============================================================================
@@ -55,10 +57,13 @@ func TestBufferBlockPop(t *testing.T) {
 	// Data should start at offset 50
 	data := block.Data()
 	rawData := block.RawData()
+	require.Same(t, &rawData[50], &data[0])
 	assert.Equal(t, rawData[50:], data, "data should start at offset 50")
+	assert.Equal(t, data, block.Pop(-1))
+	assert.Equal(t, 50, block.Used())
 
-	// Pop more than remaining
-	block.Pop(100)
+	// Pop more than remaining.
+	block.Pop(math.MaxInt)
 	assert.Equal(t, 0, block.Size(), "size should be 0 after popping more than available")
 	assert.Equal(t, 99, block.RawSize(), "raw size should still be 99")
 	assert.Equal(t, 99, block.Used(), "used should be 99")
@@ -192,87 +197,49 @@ func TestBufferManagerDynamicPushBack(t *testing.T) {
 func TestBufferManagerDynamicPushPopCycle(t *testing.T) {
 	mgr := NewBufferManager()
 	mgr.SetLimit(1023, 3)
+	checkBufferPushPopCycle(t, mgr, mgr.PushBack, mgr.PopFront, mgr.FrontData)
+}
 
-	// Run cycle 3 times to test reuse
+func checkBufferPushPopCycle(t *testing.T, mgr *BufferManager, push func(int) ([]byte, error),
+	pop func(int, bool) error, peek func() ([]byte, int, int, error)) {
+	t.Helper()
 	for cycle := 0; cycle < 3; cycle++ {
-		// Push 3 blocks
-		data0, err := mgr.PushBack(99)
-		assert.NoError(t, err)
-		fillBytes(data0, 0xFF)
+		var blocks [][]byte
+		for i, size := range []int{99, 28, 17} {
+			data, err := push(size)
+			require.NoError(t, err)
+			fillBytes(data, byte(i+1))
+			blocks = append(blocks, data)
+		}
+		data, err := push(63)
+		require.ErrorIs(t, err, ErrBuffLimit)
+		require.Nil(t, data)
+		require.ErrorIs(t, pop(-1, true), ErrInvalidArg)
 
-		data1, err := mgr.PushBack(28)
-		assert.NoError(t, err)
-		fillBytes(data1, 0x00)
+		for _, step := range []struct{ index, used, cost, count, popSize int }{
+			{0, 0, 144, 3, 128}, {1, 0, 45, 2, 100}, {2, 0, 17, 1, 10}, {2, 10, 7, 1, 10},
+		} {
+			data, used, remaining, err := peek()
+			require.NoError(t, err)
+			require.Equal(t, step.used, used)
+			want := blocks[step.index][used:]
+			require.Equal(t, len(want), remaining)
+			require.Same(t, &want[0], &data[0])
+			require.Equal(t, byte(step.index+1), data[0])
+			require.Equal(t, step.cost, mgr.Limit().CostSize)
+			require.Equal(t, step.count, mgr.Limit().CostNumber)
+			require.NoError(t, pop(step.popSize, true))
+		}
 
-		data2, err := mgr.PushBack(17)
-		assert.NoError(t, err)
-		fillBytes(data2, 0xFF)
-
-		// Should hit limit
-		_, err = mgr.PushBack(63)
-		assert.ErrorIs(t, err, ErrBuffLimit)
-
-		limit := mgr.Limit()
-		assert.Equal(t, 144, limit.CostSize)
-		assert.Equal(t, 3, limit.CostNumber)
-
-		// Pop and check front
-		frontData, _, nwrite, err := mgr.FrontData()
-		assert.NoError(t, err)
-		assert.Equal(t, 99, nwrite)
-		assert.Equal(t, byte(0xFF), frontData[0])
-
-		err = mgr.PopFront(128, true)
-		assert.NoError(t, err)
-
-		limit = mgr.Limit()
-		assert.Equal(t, 45, limit.CostSize)
-		assert.Equal(t, 2, limit.CostNumber)
-
-		// Check next front
-		frontData, _, nwrite, err = mgr.FrontData()
-		assert.NoError(t, err)
-		assert.Equal(t, 28, nwrite)
-		assert.Equal(t, byte(0x00), frontData[0])
-
-		err = mgr.PopFront(100, true)
-		assert.NoError(t, err)
-
-		limit = mgr.Limit()
-		assert.Equal(t, 17, limit.CostSize)
-		assert.Equal(t, 1, limit.CostNumber)
-
-		// Check last block
-		frontData, _, nwrite, err = mgr.FrontData()
-		assert.NoError(t, err)
-		assert.Equal(t, 17, nwrite)
-		assert.Equal(t, byte(0xFF), frontData[0])
-
-		// Pop partial (not removing block)
-		err = mgr.PopFront(10, false)
-		assert.NoError(t, err)
-		limit = mgr.Limit()
-		assert.Equal(t, 7, limit.CostSize)
-		assert.Equal(t, 1, limit.CostNumber)
-
-		frontData, _, nwrite, err = mgr.FrontData()
-		assert.NoError(t, err)
-		assert.Equal(t, 7, nwrite)
-
-		// Pop all
-		err = mgr.PopFront(10, true)
-		assert.NoError(t, err)
-		assert.True(t, mgr.Empty())
-		limit = mgr.Limit()
-		assert.Equal(t, 0, limit.CostSize)
-		assert.Equal(t, 0, limit.CostNumber)
-
-		// Pop from empty
-		_, _, _, err = mgr.FrontData()
-		assert.ErrorIs(t, err, ErrNoData)
-
-		err = mgr.PopFront(10, true)
-		assert.ErrorIs(t, err, ErrNoData)
+		require.True(t, mgr.Empty())
+		require.Zero(t, mgr.Limit().CostSize)
+		require.Zero(t, mgr.Limit().CostNumber)
+		data, used, remaining, err := peek()
+		require.ErrorIs(t, err, ErrNoData)
+		require.Nil(t, data)
+		require.Zero(t, used)
+		require.Zero(t, remaining)
+		require.ErrorIs(t, pop(10, true), ErrNoData)
 	}
 }
 
@@ -313,52 +280,7 @@ func TestBufferManagerDynamicPushFront(t *testing.T) {
 func TestBufferManagerDynamicPushFrontPopBackCycle(t *testing.T) {
 	mgr := NewBufferManager()
 	mgr.SetLimit(1023, 3)
-
-	// Run cycle 3 times
-	for cycle := 0; cycle < 3; cycle++ {
-		// Push 3 blocks from front
-		data0, err := mgr.PushFront(99)
-		assert.NoError(t, err)
-		fillBytes(data0, 0xFF)
-
-		data1, err := mgr.PushFront(28)
-		assert.NoError(t, err)
-		fillBytes(data1, 0x00)
-
-		data2, err := mgr.PushFront(17)
-		assert.NoError(t, err)
-		fillBytes(data2, 0xFF)
-
-		// Should hit limit
-		_, err = mgr.PushFront(63)
-		assert.ErrorIs(t, err, ErrBuffLimit)
-
-		limit := mgr.Limit()
-		assert.Equal(t, 144, limit.CostSize)
-		assert.Equal(t, 3, limit.CostNumber)
-
-		// Pop from back
-		backData, _, nwrite, err := mgr.BackData()
-		assert.NoError(t, err)
-		assert.Equal(t, 99, nwrite)
-		assert.Equal(t, byte(0xFF), backData[0])
-
-		err = mgr.PopBack(128, true)
-		assert.NoError(t, err)
-
-		limit = mgr.Limit()
-		assert.Equal(t, 45, limit.CostSize)
-		assert.Equal(t, 2, limit.CostNumber)
-
-		// Continue popping
-		err = mgr.PopBack(100, true)
-		assert.NoError(t, err)
-
-		err = mgr.PopBack(100, true)
-		assert.NoError(t, err)
-
-		assert.True(t, mgr.Empty())
-	}
+	checkBufferPushPopCycle(t, mgr, mgr.PushFront, mgr.PopBack, mgr.BackData)
 }
 
 // =============================================================================
@@ -385,103 +307,14 @@ func TestBufferManagerStaticSetMode(t *testing.T) {
 func TestBufferManagerStaticPushBack(t *testing.T) {
 	mgr := NewBufferManager()
 	mgr.SetMode(1023, 3)
-
-	// Run cycle 3 times
-	for cycle := 0; cycle < 3; cycle++ {
-		// Push 3 blocks
-		data0, err := mgr.PushBack(99)
-		assert.NoError(t, err)
-		fillBytes(data0, 0xFF)
-
-		data1, err := mgr.PushBack(28)
-		assert.NoError(t, err)
-		fillBytes(data1, 0x00)
-
-		data2, err := mgr.PushBack(17)
-		assert.NoError(t, err)
-		fillBytes(data2, 0xFF)
-
-		// Should hit limit
-		_, err = mgr.PushBack(63)
-		assert.ErrorIs(t, err, ErrBuffLimit)
-
-		limit := mgr.Limit()
-		assert.Equal(t, 144, limit.CostSize)
-		assert.Equal(t, 3, limit.CostNumber)
-
-		// Pop and check
-		frontData, _, nwrite, err := mgr.FrontData()
-		assert.NoError(t, err)
-		assert.Equal(t, 99, nwrite)
-		assert.Equal(t, byte(0xFF), frontData[0])
-
-		err = mgr.PopFront(128, true)
-		assert.NoError(t, err)
-
-		limit = mgr.Limit()
-		assert.Equal(t, 45, limit.CostSize)
-		assert.Equal(t, 2, limit.CostNumber)
-
-		// Pop remaining
-		err = mgr.PopFront(100, true)
-		assert.NoError(t, err)
-
-		err = mgr.PopFront(100, true)
-		assert.NoError(t, err)
-
-		assert.True(t, mgr.Empty())
-		limit = mgr.Limit()
-		assert.Equal(t, 0, limit.CostSize)
-		assert.Equal(t, 0, limit.CostNumber)
-	}
+	checkBufferPushPopCycle(t, mgr, mgr.PushBack, mgr.PopFront, mgr.FrontData)
 }
 
 // TestBufferManagerStaticPushFront tests push front in static mode
 func TestBufferManagerStaticPushFront(t *testing.T) {
 	mgr := NewBufferManager()
 	mgr.SetMode(1023, 3)
-
-	// Run cycle 3 times
-	for cycle := 0; cycle < 3; cycle++ {
-		// Push 3 blocks from front
-		data0, err := mgr.PushFront(99)
-		assert.NoError(t, err)
-		fillBytes(data0, 0xFF)
-
-		data1, err := mgr.PushFront(28)
-		assert.NoError(t, err)
-		fillBytes(data1, 0x00)
-
-		data2, err := mgr.PushFront(17)
-		assert.NoError(t, err)
-		fillBytes(data2, 0xFF)
-
-		// Should hit limit
-		_, err = mgr.PushFront(63)
-		assert.ErrorIs(t, err, ErrBuffLimit)
-
-		limit := mgr.Limit()
-		assert.Equal(t, 144, limit.CostSize)
-		assert.Equal(t, 3, limit.CostNumber)
-
-		// Pop from back
-		backData, _, nwrite, err := mgr.BackData()
-		assert.NoError(t, err)
-		assert.Equal(t, 99, nwrite)
-		assert.Equal(t, byte(0xFF), backData[0])
-
-		err = mgr.PopBack(128, true)
-		assert.NoError(t, err)
-
-		// Pop remaining
-		err = mgr.PopBack(100, true)
-		assert.NoError(t, err)
-
-		err = mgr.PopBack(100, true)
-		assert.NoError(t, err)
-
-		assert.True(t, mgr.Empty())
-	}
+	checkBufferPushPopCycle(t, mgr, mgr.PushFront, mgr.PopBack, mgr.BackData)
 }
 
 // =============================================================================

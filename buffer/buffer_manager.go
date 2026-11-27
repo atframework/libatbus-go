@@ -27,10 +27,16 @@ type BufferManager struct {
 
 // staticBufferStorage holds the static mode ring buffer data
 type staticBufferStorage struct {
-	buffer      []byte          // The underlying contiguous buffer
-	circleIndex []*BufferBlock  // Circular index of buffer blocks
-	head        int             // Head index in circleIndex
-	tail        int             // Tail index in circleIndex
+	buffer      []byte             // The underlying contiguous buffer
+	circleIndex []staticBufferSlot // Circular index of buffer blocks
+	endOffset   int                // First free byte after the back block
+	head        int                // Head index in circleIndex
+	tail        int                // Tail index in circleIndex
+}
+
+type staticBufferSlot struct {
+	block  *BufferBlock
+	offset int // Start of the reserved header in the byte ring.
 }
 
 // NewBufferManager creates a new buffer manager in dynamic mode
@@ -67,7 +73,7 @@ func (m *BufferManager) SetMode(maxSize, maxNumber int) {
 		bufSize := PaddingSize(maxSize + DataAlignSize)
 		m.staticBuffer = &staticBufferStorage{
 			buffer:      make([]byte, bufSize),
-			circleIndex: make([]*BufferBlock, maxNumber+1), // +1 for empty slot
+			circleIndex: make([]staticBufferSlot, maxNumber+1), // +1 for empty slot
 			head:        0,
 			tail:        0,
 		}
@@ -155,11 +161,14 @@ func (m *BufferManager) BackData() (data []byte, nread, nwrite int, err error) {
 
 // PushBack allocates a new block at the back and returns the data slice
 func (m *BufferManager) PushBack(size int) (data []byte, err error) {
+	if size < 0 {
+		return nil, ErrInvalidArg
+	}
 	if m.limit.LimitNumber > 0 && m.limit.CostNumber >= m.limit.LimitNumber {
 		return nil, ErrBuffLimit
 	}
 
-	if m.limit.LimitSize > 0 && m.limit.CostSize+size > m.limit.LimitSize {
+	if m.limit.LimitSize > 0 && size > m.limit.LimitSize-m.limit.CostSize {
 		return nil, ErrBuffLimit
 	}
 
@@ -182,11 +191,14 @@ func (m *BufferManager) PushBack(size int) (data []byte, err error) {
 
 // PushFront allocates a new block at the front and returns the data slice
 func (m *BufferManager) PushFront(size int) (data []byte, err error) {
+	if size < 0 {
+		return nil, ErrInvalidArg
+	}
 	if m.limit.LimitNumber > 0 && m.limit.CostNumber >= m.limit.LimitNumber {
 		return nil, ErrBuffLimit
 	}
 
-	if m.limit.LimitSize > 0 && m.limit.CostSize+size > m.limit.LimitSize {
+	if m.limit.LimitSize > 0 && size > m.limit.LimitSize-m.limit.CostSize {
 		return nil, ErrBuffLimit
 	}
 
@@ -209,6 +221,9 @@ func (m *BufferManager) PushFront(size int) (data []byte, err error) {
 
 // PopBack pops bytes from the back block
 func (m *BufferManager) PopBack(size int, freeUnwritable bool) error {
+	if size < 0 {
+		return ErrInvalidArg
+	}
 	if m.IsDynamicMode() {
 		return m.dynamicPopBack(size, freeUnwritable)
 	}
@@ -217,6 +232,9 @@ func (m *BufferManager) PopBack(size int, freeUnwritable bool) error {
 
 // PopFront pops bytes from the front block
 func (m *BufferManager) PopFront(size int, freeUnwritable bool) error {
+	if size < 0 {
+		return ErrInvalidArg
+	}
 	if m.IsDynamicMode() {
 		return m.dynamicPopFront(size, freeUnwritable)
 	}
@@ -225,11 +243,14 @@ func (m *BufferManager) PopFront(size int, freeUnwritable bool) error {
 
 // MergeBack extends the back block by additional size
 func (m *BufferManager) MergeBack(size int) (data []byte, err error) {
+	if size < 0 {
+		return nil, ErrInvalidArg
+	}
 	if m.Empty() {
 		return m.PushBack(size)
 	}
 
-	if m.limit.LimitSize > 0 && m.limit.CostSize+size > m.limit.LimitSize {
+	if m.limit.LimitSize > 0 && size > m.limit.LimitSize-m.limit.CostSize {
 		return nil, ErrBuffLimit
 	}
 
@@ -248,11 +269,14 @@ func (m *BufferManager) MergeBack(size int) (data []byte, err error) {
 
 // MergeFront extends the front block by additional size
 func (m *BufferManager) MergeFront(size int) (data []byte, err error) {
+	if size < 0 {
+		return nil, ErrInvalidArg
+	}
 	if m.Empty() {
 		return m.PushFront(size)
 	}
 
-	if m.limit.LimitSize > 0 && m.limit.CostSize+size > m.limit.LimitSize {
+	if m.limit.LimitSize > 0 && size > m.limit.LimitSize-m.limit.CostSize {
 		return nil, ErrBuffLimit
 	}
 
@@ -423,16 +447,15 @@ func (m *BufferManager) dynamicMergeFront(size int) ([]byte, error) {
 		return nil, ErrMalloc
 	}
 
-	// Copy old data to the end (after the new space)
-	copy(newBlock.data[size:], block.RawData())
+	// MergeFront extends the first block after its existing payload.
+	copy(newBlock.data, block.RawData())
 	newBlock.used = block.Used()
 
 	// Replace the front element
 	elem := m.dynamicBuffer.Front()
 	elem.Value = newBlock
 
-	// Return pointer to the new space at the front
-	return newBlock.data[:size], nil
+	return newBlock.data[block.RawSize():], nil
 }
 
 // ============= Static Mode Implementation =============
@@ -448,7 +471,7 @@ func (m *BufferManager) staticFront() *BufferBlock {
 	if m.staticEmpty() {
 		return nil
 	}
-	return m.staticBuffer.circleIndex[m.staticBuffer.head]
+	return m.staticBuffer.circleIndex[m.staticBuffer.head].block
 }
 
 func (m *BufferManager) staticBack() *BufferBlock {
@@ -456,87 +479,51 @@ func (m *BufferManager) staticBack() *BufferBlock {
 		return nil
 	}
 	tailIndex := (m.staticBuffer.tail + len(m.staticBuffer.circleIndex) - 1) % len(m.staticBuffer.circleIndex)
-	return m.staticBuffer.circleIndex[tailIndex]
+	return m.staticBuffer.circleIndex[tailIndex].block
+}
+
+// place returns a capacity-limited view so callers cannot append into a neighboring block.
+func (sb *staticBufferStorage) place(index, offset, size int) *BufferBlock {
+	start := offset + HeadSize(size)
+	block := &BufferBlock{data: sb.buffer[start : start+size : start+size]}
+	sb.circleIndex[index] = staticBufferSlot{block: block, offset: offset}
+	return block
 }
 
 func (m *BufferManager) staticPushBack(size int) (*BufferBlock, error) {
 	sb := m.staticBuffer
-	circleLen := len(sb.circleIndex)
-
-	// Check if circle buffer is full
-	if (sb.tail+1)%circleLen == sb.head {
+	head, end := sb.circleIndex[sb.head].offset, sb.endOffset
+	need := FullSize(size)
+	start := end
+	if end >= head && need > len(sb.buffer)-end {
+		start = 0
+		if need >= head {
+			return nil, ErrBuffLimit
+		}
+	} else if end < head && need >= head-end {
 		return nil, ErrBuffLimit
 	}
-
-	// Get current head and tail blocks
-	head := sb.circleIndex[sb.head]
-	tail := sb.circleIndex[sb.tail]
-
-	// Empty init
-	if head == nil && tail == nil {
-		sb.tail = 0
-		sb.head = 0
-		// Create first block at the beginning of buffer
-		block := &BufferBlock{
-			data: sb.buffer[:size],
-			used: 0,
-		}
-		sb.circleIndex[sb.tail] = block
-		sb.tail = (sb.tail + 1) % circleLen
-		return block, nil
-	}
-
-	// Find a slot for the new block
-	// In static mode, we need to find contiguous space
-	// For simplicity, we'll allocate sequentially
-	block := NewBufferBlock(size)
-	if block == nil {
-		return nil, ErrMalloc
-	}
-
-	sb.circleIndex[sb.tail] = block
-	sb.tail = (sb.tail + 1) % circleLen
-
+	block := sb.place(sb.tail, start, size)
+	sb.tail = (sb.tail + 1) % len(sb.circleIndex)
+	sb.endOffset = start + need
 	return block, nil
 }
 
 func (m *BufferManager) staticPushFront(size int) (*BufferBlock, error) {
 	sb := m.staticBuffer
-	circleLen := len(sb.circleIndex)
-
-	// Check if circle buffer is full
-	if (sb.tail+1)%circleLen == sb.head {
+	head, end := sb.circleIndex[sb.head].offset, sb.endOffset
+	need := FullSize(size)
+	start := head - need
+	if end >= head && start < 0 {
+		start = len(sb.buffer) - need
+		if start <= end {
+			return nil, ErrBuffLimit
+		}
+	} else if end < head && start <= end {
 		return nil, ErrBuffLimit
 	}
-
-	// Get current head and tail blocks
-	head := sb.circleIndex[sb.head]
-	tail := sb.circleIndex[sb.tail]
-
-	// Empty init
-	if head == nil && tail == nil {
-		sb.tail = 0
-		sb.head = 0
-		block := &BufferBlock{
-			data: sb.buffer[:size],
-			used: 0,
-		}
-		sb.circleIndex[sb.head] = block
-		sb.tail = (sb.tail + 1) % circleLen
-		return block, nil
-	}
-
-	// Create new block
-	block := NewBufferBlock(size)
-	if block == nil {
-		return nil, ErrMalloc
-	}
-
-	// Move head back
-	sb.head = (sb.head + circleLen - 1) % circleLen
-	sb.circleIndex[sb.head] = block
-
-	return block, nil
+	sb.head = (sb.head + len(sb.circleIndex) - 1) % len(sb.circleIndex)
+	return sb.place(sb.head, start, size), nil
 }
 
 func (m *BufferManager) staticPopBack(size int, freeUnwritable bool) error {
@@ -548,7 +535,7 @@ func (m *BufferManager) staticPopBack(size int, freeUnwritable bool) error {
 	circleLen := len(sb.circleIndex)
 
 	tailIndex := (sb.tail + circleLen - 1) % circleLen
-	block := sb.circleIndex[tailIndex]
+	block := sb.circleIndex[tailIndex].block
 
 	if size > block.Size() {
 		size = block.Size()
@@ -556,7 +543,8 @@ func (m *BufferManager) staticPopBack(size int, freeUnwritable bool) error {
 
 	block.Pop(size)
 	if freeUnwritable && block.Size() == 0 {
-		sb.circleIndex[tailIndex] = nil
+		sb.endOffset = sb.circleIndex[tailIndex].offset
+		sb.circleIndex[tailIndex] = staticBufferSlot{}
 		sb.tail = tailIndex
 
 		if m.limit.CostNumber > 0 {
@@ -568,6 +556,7 @@ func (m *BufferManager) staticPopBack(size int, freeUnwritable bool) error {
 	if m.staticEmpty() {
 		sb.head = 0
 		sb.tail = 0
+		sb.endOffset = 0
 		m.limit.CostSize = 0
 		m.limit.CostNumber = 0
 	} else {
@@ -589,7 +578,7 @@ func (m *BufferManager) staticPopFront(size int, freeUnwritable bool) error {
 	sb := m.staticBuffer
 	circleLen := len(sb.circleIndex)
 
-	block := sb.circleIndex[sb.head]
+	block := sb.circleIndex[sb.head].block
 
 	if size > block.Size() {
 		size = block.Size()
@@ -597,7 +586,7 @@ func (m *BufferManager) staticPopFront(size int, freeUnwritable bool) error {
 
 	block.Pop(size)
 	if freeUnwritable && block.Size() == 0 {
-		sb.circleIndex[sb.head] = nil
+		sb.circleIndex[sb.head] = staticBufferSlot{}
 		sb.head = (sb.head + 1) % circleLen
 
 		if m.limit.CostNumber > 0 {
@@ -609,6 +598,7 @@ func (m *BufferManager) staticPopFront(size int, freeUnwritable bool) error {
 	if m.staticEmpty() {
 		sb.head = 0
 		sb.tail = 0
+		sb.endOffset = 0
 		m.limit.CostSize = 0
 		m.limit.CostNumber = 0
 	} else {
@@ -626,58 +616,59 @@ func (m *BufferManager) staticMergeBack(size int) ([]byte, error) {
 	if size == 0 {
 		return nil, nil
 	}
-
-	block := m.staticBack()
-	if block == nil {
-		return nil, ErrNoData
-	}
-
-	// Create a new larger block and copy data
-	newBlock := NewBufferBlock(size + block.RawSize())
-	if newBlock == nil {
-		return nil, ErrMalloc
-	}
-
-	// Copy old data
-	copy(newBlock.data, block.RawData())
-	newBlock.used = block.Used()
-
-	// Replace in circle index
 	sb := m.staticBuffer
-	circleLen := len(sb.circleIndex)
-	tailIndex := (sb.tail + circleLen - 1) % circleLen
-	sb.circleIndex[tailIndex] = newBlock
-
-	// Return pointer to the new space
-	return newBlock.data[block.RawSize():], nil
+	index := (sb.tail + len(sb.circleIndex) - 1) % len(sb.circleIndex)
+	last := sb.circleIndex[index]
+	head := sb.circleIndex[sb.head].offset
+	start := last.offset
+	end := start + FullSize(last.block.RawSize())
+	growth := PaddingSize(size)
+	if start >= head {
+		if growth > len(sb.buffer)-end {
+			if FullSize(last.block.RawSize()+size) >= head {
+				return nil, ErrBuffLimit
+			}
+			start = 0
+		}
+	} else if growth >= head-end {
+		return nil, ErrBuffLimit
+	}
+	sb.endOffset = start + FullSize(last.block.RawSize()+size)
+	return sb.grow(index, start, size), nil
 }
 
 func (m *BufferManager) staticMergeFront(size int) ([]byte, error) {
 	if size == 0 {
 		return nil, nil
 	}
-
-	block := m.staticFront()
-	if block == nil {
-		return nil, ErrNoData
-	}
-
-	// Create a new larger block
-	newBlock := NewBufferBlock(size + block.RawSize())
-	if newBlock == nil {
-		return nil, ErrMalloc
-	}
-
-	// Copy old data to the end (after the new space)
-	copy(newBlock.data[size:], block.RawData())
-	newBlock.used = block.Used()
-
-	// Replace in circle index
 	sb := m.staticBuffer
-	sb.circleIndex[sb.head] = newBlock
+	first := sb.circleIndex[sb.head]
+	end := sb.endOffset
+	start := first.offset - PaddingSize(size)
+	if end >= first.offset && start < 0 {
+		start = len(sb.buffer) - FullSize(first.block.RawSize()+size)
+		if start <= end {
+			return nil, ErrBuffLimit
+		}
+	} else if end < first.offset && start <= end {
+		return nil, ErrBuffLimit
+	}
+	return sb.grow(sb.head, start, size), nil
+}
 
-	// Return pointer to the new space at the front
-	return newBlock.data[:size], nil
+func (sb *staticBufferStorage) grow(index, start, size int) []byte {
+	slot := &sb.circleIndex[index]
+	block := slot.block
+	oldSize := block.RawSize()
+	dataStart := start + HeadSize(oldSize+size)
+	dataEnd := dataStart + oldSize + size
+	data := sb.buffer[dataStart:dataEnd:dataEnd]
+	if start != slot.offset {
+		copy(data, block.data)
+		slot.offset = start
+	}
+	block.data = data
+	return data[oldSize:]
 }
 
 // Count returns the number of buffer blocks
@@ -716,8 +707,8 @@ func (m *BufferManager) ForEach(fn func(block *BufferBlock) bool) {
 	sb := m.staticBuffer
 	circleLen := len(sb.circleIndex)
 	for i := sb.head; i != sb.tail; i = (i + 1) % circleLen {
-		if sb.circleIndex[i] != nil {
-			if !fn(sb.circleIndex[i]) {
+		if sb.circleIndex[i].block != nil {
+			if !fn(sb.circleIndex[i].block) {
 				break
 			}
 		}

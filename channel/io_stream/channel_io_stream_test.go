@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -126,157 +127,107 @@ func getUnixSocketPath(t *testing.T) string {
 // Covers small buffers, big buffers, and many big buffers.
 func TestIoStreamTcpBasic(t *testing.T) {
 	port := getFreePort(t)
-	listenAddr := fmt.Sprintf("ipv4://127.0.0.1:%d", port)
-
-	ctx := context.Background()
-	svr := NewIoStreamChannel(ctx, nil)
-	cli := NewIoStreamChannel(ctx, nil)
-
-	// Track callback events
-	var checkFlag atomic.Int32
-	var recvRec recvRecord
-	var checkBufSeq checkBuffSequence
-
-	testBuf := getTestBuffer()
-
-	// Setup listen callback -> set accepted callback
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeAccepted,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			// Accepted callback: verify connection
-			assert.NotNil(t, channel, "accepted: channel should not be nil")
-			assert.NotNil(t, conn, "accepted: connection should not be nil")
-			assert.Equal(t, int32(0), status, "accepted: status should be 0")
-			t.Logf("accept connection: %s", conn.GetAddress().GetAddress())
-			checkFlag.Add(1)
-		})
-
-	cli.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeConnected,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			assert.NotNil(t, channel, "connected: channel should not be nil")
-			assert.NotNil(t, conn, "connected: connection should not be nil")
-			assert.Equal(t, int32(0), status, "connected: status should be 0")
-			t.Logf("connect to %s success", conn.GetAddress().GetAddress())
-			checkFlag.Add(1)
-		})
-
-	// Listen
-	errCode := svr.Listen(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "listen should succeed")
-
-	// Connect multiple clients (matching C++ which connects ipv4, dns, ipv6)
-	conn1, errCode := cli.Connect(fmt.Sprintf("ipv4://127.0.0.1:%d", port))
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "connect ipv4 should succeed")
-	assert.NotNil(t, conn1, "connection should not be nil")
-
-	// Wait for connections established (connected + accepted callbacks)
-	ok := waitForCondition(t, 5*time.Second, func() bool {
-		return checkFlag.Load() >= 2 // 1 connected + 1 accepted
-	})
-	assert.True(t, ok, "should receive connected+accepted callbacks, got %d", checkFlag.Load())
-
-	// Setup receive callback on server
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeReceived,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			assert.NotNil(t, channel, "recv: channel should not be nil")
-			assert.NotNil(t, conn, "recv: connection should not be nil")
-
-			data, ok := privData.([]byte)
-			if !ok || data == nil {
-				t.Errorf("recv: privData should be []byte, got %T", privData)
-				return
-			}
-
-			offset, length, seqOk := checkBufSeq.popFront()
-			if !seqOk {
-				t.Error("recv: unexpected data received (no expected sequence)")
-				return
-			}
-
-			recvRec.mu.Lock()
-			recvRec.count++
-			recvRec.bytes += len(data)
-			recvRec.mu.Unlock()
-
-			assert.Equal(t, length, len(data), "recv: data length should match expected (offset=%d)", offset)
-			expected := testBuf[offset : offset+length]
-			if !bytes.Equal(expected, data) {
-				maxShow := 32
-				if len(data) < maxShow {
-					maxShow = len(data)
-				}
-				t.Errorf("recv: data content mismatch at offset=%d length=%d, first %d bytes: expected=%v got=%v",
-					offset, length, maxShow, expected[:maxShow], data[:maxShow])
-			}
-
-			checkFlag.Add(1)
-		})
-
-	baseCheckFlag := checkFlag.Load()
-
-	// Small buffer tests (matching C++ test: cli sends to svr)
-	checkBufSeq.pushBack(0, 13)
-	errCode = cli.Send(conn1, testBuf[0:13])
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "send small 1 should succeed")
-
-	checkBufSeq.pushBack(13, 28)
-	errCode = cli.Send(conn1, testBuf[13:13+28])
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "send small 2 should succeed")
-
-	checkBufSeq.pushBack(13+28, 100)
-	errCode = cli.Send(conn1, testBuf[13+28:13+28+100])
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "send small 3 should succeed")
-
-	// Big buffer test
-	checkBufSeq.pushBack(1024, 56*1024+3)
-	errCode = cli.Send(conn1, testBuf[1024:1024+56*1024+3])
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "send big should succeed")
-
-	// Wait for 4 receive callbacks
-	ok = waitForCondition(t, 10*time.Second, func() bool {
-		return checkFlag.Load()-baseCheckFlag >= 4
-	})
-	assert.True(t, ok, "should receive 4 messages, got %d", checkFlag.Load()-baseCheckFlag)
-
-	// Many big buffer tests (matching C++ 153 messages)
-	baseCheckFlag = checkFlag.Load()
-	recvRec.mu.Lock()
-	recvRec.count = 0
-	recvRec.bytes = 0
-	recvRec.mu.Unlock()
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	sumSize := 0
-	for i := 0; i < 153; i++ {
-		s := rng.Intn(2048)
-		l := rng.Intn(10240) + 20*1024
-		if s+l > maxTestBufferLen {
-			l = maxTestBufferLen - s
-		}
-		checkBufSeq.pushBack(s, l)
-		errCode = cli.Send(conn1, testBuf[s:s+l])
-		assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "send big %d should succeed", i)
-		sumSize += l
+	addresses := []string{fmt.Sprintf("ipv4://127.0.0.1:%d", port)}
+	if probeIPv6Loopback() {
+		addresses = append(addresses, fmt.Sprintf("dns://localhost:%d", port), fmt.Sprintf("ipv6://::1:%d", port))
 	}
+	runIoStreamBasic(t, fmt.Sprintf("atcp://:::%d", port), addresses)
+}
 
-	t.Logf("send %d bytes data with %d packages done", sumSize, 153)
+func runIoStreamBasic(t *testing.T, listenAddress string, dialAddresses []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	server, client := NewIoStreamChannel(ctx, nil), NewIoStreamChannel(ctx, nil)
+	defer server.Close()
+	defer client.Close()
 
-	ok = waitForCondition(t, 30*time.Second, func() bool {
-		return checkFlag.Load()-baseCheckFlag >= 153
-	})
-	assert.True(t, ok, "should receive 153 messages, got %d", checkFlag.Load()-baseCheckFlag)
+	accepted := make(chan types.IoStreamConnection, len(dialAddresses))
+	var connected atomic.Int32
+	server.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeAccepted,
+		func(ch types.IoStreamChannel, conn types.IoStreamConnection, status int32, _ interface{}) {
+			assert.Same(t, server, ch)
+			assert.NotNil(t, conn)
+			assert.Zero(t, status)
+			select {
+			case accepted <- conn:
+			case <-ctx.Done():
+			}
+		})
+	client.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeConnected,
+		func(ch types.IoStreamChannel, conn types.IoStreamConnection, status int32, _ interface{}) {
+			assert.Same(t, client, ch)
+			assert.NotNil(t, conn)
+			assert.Zero(t, status)
+			connected.Add(1)
+		})
+	const burst = 153
+	receive := func(ch *IoStreamChannel, capacity int) <-chan []byte {
+		frames := make(chan []byte, capacity)
+		ch.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeReceived,
+			func(receiver types.IoStreamChannel, conn types.IoStreamConnection, status int32, data interface{}) {
+				assert.Same(t, ch, receiver)
+				assert.NotNil(t, conn)
+				assert.Zero(t, status)
+				payload, ok := data.([]byte)
+				if assert.True(t, ok, "unexpected received data %T", data) {
+					select {
+					case frames <- bytes.Clone(payload):
+					case <-ctx.Done():
+					}
+				}
+			})
+		return frames
+	}
+	requests, replies := receive(server, 4), receive(client, burst)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.Listen(listenAddress))
+	var firstClient, firstServer types.IoStreamConnection
+	for i, address := range dialAddresses {
+		conn, code := client.Connect(address)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code, address)
+		require.NotNil(t, conn)
+		select {
+		case peer := <-accepted:
+			if i == 0 {
+				firstClient, firstServer = conn, peer
+			}
+		case <-ctx.Done():
+			t.Fatalf("accept %s: %v", address, ctx.Err())
+		}
+	}
+	require.Eventually(t, func() bool { return int(connected.Load()) == len(dialAddresses) }, 5*time.Second, time.Millisecond)
 
-	recvRec.mu.Lock()
-	t.Logf("recv %d bytes data with %d packages and checked done", recvRec.bytes, recvRec.count)
-	recvRec.mu.Unlock()
+	checkFrames := func(frames <-chan []byte, expected [][]byte) {
+		t.Helper()
+		for i, want := range expected {
+			select {
+			case got := <-frames:
+				require.True(t, bytes.Equal(want, got), "frame %d: expected %d bytes, received %d", i, len(want), len(got))
+			case <-ctx.Done():
+				t.Fatalf("waiting for frame %d of %d: %v", i+1, len(expected), ctx.Err())
+			}
+		}
+	}
+	buf := getTestBuffer()
+	small := [][]byte{buf[:13], buf[13:41], buf[41:141], buf[1024 : 1024+56*1024+3]}
+	for _, frame := range small {
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.Send(firstClient, frame))
+	}
+	checkFrames(requests, small)
 
-	// Close
-	svr.Close()
-	cli.Close()
+	rng := rand.New(rand.NewSource(42))
+	large := make([][]byte, burst)
+	for i := range large {
+		offset, size := rng.Intn(2048), 20*1024+rng.Intn(10240)
+		large[i] = buf[offset : offset+size]
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.Send(firstServer, large[i]))
+	}
+	checkFrames(replies, large)
 
-	ok = waitForCondition(t, 5*time.Second, func() bool {
-		return len(svr.GetConnections()) == 0 && len(cli.GetConnections()) == 0
-	})
-	assert.True(t, ok, "all connections should be cleaned up")
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.Close())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.Close())
+	require.Empty(t, server.GetConnections())
+	require.Empty(t, client.GetConnections())
 }
 
 // ============================================================================
@@ -429,64 +380,43 @@ func TestIoStreamTcpResetByServer(t *testing.T) {
 // ============================================================================
 
 // TestIoStreamTcpSizeExtended verifies send/receive buffer size limits.
-func TestIoStreamTcpSizeExtended(t *testing.T) {
-	port := getFreePort(t)
-
-	conf := &IoStreamConfigure{}
-	SetDefaultIoStreamConfigure(conf)
-	// Set send_buffer_limit_size > receive_buffer_limit_size to test oversized messages
-	conf.SendBufferLimitSize = conf.ReceiveBufferLimitSize + 1
-
-	ctx := context.Background()
-	svr := NewIoStreamChannel(ctx, conf)
-	cli := NewIoStreamChannel(ctx, conf)
-
-	var connectedCount atomic.Int32
-
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeAccepted,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			connectedCount.Add(1)
-		})
-
-	cli.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeConnected,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			connectedCount.Add(1)
-		})
-
-	// Listen
-	errCode := svr.Listen(fmt.Sprintf("ipv4://127.0.0.1:%d", port))
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
-
-	// Connect
-	conn1, errCode := cli.Connect(fmt.Sprintf("ipv4://127.0.0.1:%d", port))
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
-	assert.NotNil(t, conn1)
-
-	// Wait for connection
-	ok := waitForCondition(t, 5*time.Second, func() bool {
-		return connectedCount.Load() >= 2
+func testIoStreamReceiveSizeLimits(t *testing.T, addr string) {
+	t.Helper()
+	var conf IoStreamConfigure
+	SetDefaultIoStreamConfigure(&conf)
+	conf.ReceiveBufferLimitSize = uint64(DataSmallSize) * 2
+	conf.ReceiveBufferMaxSize = conf.ReceiveBufferLimitSize * 2
+	conf.SendBufferLimitSize = conf.ReceiveBufferMaxSize + 1
+	svr, cli := NewIoStreamChannel(context.Background(), &conf), NewIoStreamChannel(context.Background(), &conf)
+	t.Cleanup(func() { cli.Close(); svr.Close() })
+	type receipt struct {
+		status int32
+		data   []byte
+	}
+	received := make(chan receipt, 4)
+	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeReceived, func(_ types.IoStreamChannel, _ types.IoStreamConnection, status int32, value any) {
+		data, _ := value.([]byte)
+		received <- receipt{status, bytes.Clone(data)}
 	})
-	assert.True(t, ok, "should establish connection")
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, svr.Listen(addr))
+	conn, code := cli.Connect(addr)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+	oversized := bytes.Repeat([]byte{0xa3}, int(conf.ReceiveBufferLimitSize+1))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, cli.Send(conn, oversized))
+	require.Equal(t, error_code.EN_ATBUS_ERR_INVALID_SIZE, cli.Send(conn, make([]byte, conf.SendBufferLimitSize+1)))
+	select {
+	case event := <-received:
+		require.Equal(t, int32(error_code.EN_ATBUS_ERR_INVALID_SIZE), event.status)
+		require.Equal(t, oversized, event.data)
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing receive size error")
+	}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, cli.Send(conn, make([]byte, conf.SendBufferLimitSize)))
+	require.Eventually(t, func() bool { return len(cli.GetConnections()) == 0 && len(svr.GetConnections()) == 0 }, 3*time.Second, time.Millisecond)
+}
 
-	testBuf := getTestBuffer()
-
-	// Sending data larger than send_buffer_limit_size should fail with EN_ATBUS_ERR_INVALID_SIZE
-	oversizedBuf := make([]byte, conf.SendBufferLimitSize+1)
-	copy(oversizedBuf, testBuf)
-	errCode = cli.Send(conn1, oversizedBuf)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_INVALID_SIZE, errCode,
-		"send larger than send_buffer_limit_size should return EN_ATBUS_ERR_INVALID_SIZE")
-
-	// Sending data at exactly send_buffer_limit_size should succeed
-	exactBuf := make([]byte, conf.SendBufferLimitSize)
-	copy(exactBuf, testBuf)
-	errCode = cli.Send(conn1, exactBuf)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode,
-		"send at send_buffer_limit_size should succeed")
-
-	// Cleanup
-	cli.Close()
-	svr.Close()
+func TestIoStreamTcpSizeExtended(t *testing.T) {
+	testIoStreamReceiveSizeLimits(t, fmt.Sprintf("ipv4://127.0.0.1:%d", getFreePort(t)))
 }
 
 // ============================================================================
@@ -618,150 +548,10 @@ func TestIoStreamUnixBasic(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix socket test skipped on Windows")
 	}
-
-	sockPath := getUnixSocketPath(t)
-	defer os.Remove(sockPath)
-
-	listenAddr := "unix://" + sockPath
-
-	ctx := context.Background()
-	svr := NewIoStreamChannel(ctx, nil)
-	cli := NewIoStreamChannel(ctx, nil)
-
-	var checkFlag atomic.Int32
-	var recvRec recvRecord
-	var checkBufSeq checkBuffSequence
-
-	testBuf := getTestBuffer()
-
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeAccepted,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			assert.NotNil(t, channel)
-			assert.NotNil(t, conn)
-			assert.Equal(t, int32(0), status)
-			t.Logf("unix accept connection: %s", conn.GetAddress().GetAddress())
-			checkFlag.Add(1)
-		})
-
-	cli.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeConnected,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			assert.NotNil(t, channel)
-			assert.NotNil(t, conn)
-			assert.Equal(t, int32(0), status)
-			t.Logf("unix connect to %s success", conn.GetAddress().GetAddress())
-			checkFlag.Add(1)
-		})
-
-	// Listen
-	errCode := svr.Listen(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "unix listen should succeed")
-
-	// Connect 3 clients (matching C++ test)
-	var conns []types.IoStreamConnection
-	for i := 0; i < 3; i++ {
-		conn, errCode := cli.Connect(listenAddr)
-		assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "unix connect %d should succeed", i)
-		assert.NotNil(t, conn)
-		conns = append(conns, conn)
-	}
-
-	// Wait for all connections established (3 connected + 3 accepted = 6)
-	ok := waitForCondition(t, 5*time.Second, func() bool {
-		return checkFlag.Load() >= 6
-	})
-	assert.True(t, ok, "should establish 3 connections, got %d callbacks", checkFlag.Load())
-
-	// Setup receive callback on server
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeReceived,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			assert.NotNil(t, channel)
-			assert.NotNil(t, conn)
-
-			data, ok := privData.([]byte)
-			if !ok || data == nil {
-				t.Errorf("recv: privData should be []byte")
-				return
-			}
-
-			offset, length, seqOk := checkBufSeq.popFront()
-			if !seqOk {
-				t.Error("recv: unexpected data received")
-				return
-			}
-
-			recvRec.mu.Lock()
-			recvRec.count++
-			recvRec.bytes += len(data)
-			recvRec.mu.Unlock()
-
-			assert.Equal(t, length, len(data), "recv: data length mismatch")
-			expected := testBuf[offset : offset+length]
-			assert.True(t, bytes.Equal(expected, data), "recv: data content mismatch")
-
-			checkFlag.Add(1)
-		})
-
-	baseCheckFlag := checkFlag.Load()
-
-	// Small buffer tests via first connection
-	firstConn := conns[0]
-	checkBufSeq.pushBack(0, 13)
-	cli.Send(firstConn, testBuf[0:13])
-
-	checkBufSeq.pushBack(13, 28)
-	cli.Send(firstConn, testBuf[13:13+28])
-
-	checkBufSeq.pushBack(13+28, 100)
-	cli.Send(firstConn, testBuf[13+28:13+28+100])
-
-	// Big buffer test
-	checkBufSeq.pushBack(1024, 56*1024+3)
-	cli.Send(firstConn, testBuf[1024:1024+56*1024+3])
-
-	ok = waitForCondition(t, 10*time.Second, func() bool {
-		return checkFlag.Load()-baseCheckFlag >= 4
-	})
-	assert.True(t, ok, "should receive 4 messages, got %d", checkFlag.Load()-baseCheckFlag)
-
-	// Many big buffer tests (153 messages)
-	baseCheckFlag = checkFlag.Load()
-	recvRec.mu.Lock()
-	recvRec.count = 0
-	recvRec.bytes = 0
-	recvRec.mu.Unlock()
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	sumSize := 0
-	for i := 0; i < 153; i++ {
-		s := rng.Intn(2048)
-		l := rng.Intn(10240) + 20*1024
-		if s+l > maxTestBufferLen {
-			l = maxTestBufferLen - s
-		}
-		checkBufSeq.pushBack(s, l)
-		cli.Send(firstConn, testBuf[s:s+l])
-		sumSize += l
-	}
-
-	t.Logf("unix send %d bytes data with %d packages done", sumSize, 153)
-
-	ok = waitForCondition(t, 30*time.Second, func() bool {
-		return checkFlag.Load()-baseCheckFlag >= 153
-	})
-	assert.True(t, ok, "should receive 153 messages, got %d", checkFlag.Load()-baseCheckFlag)
-
-	recvRec.mu.Lock()
-	t.Logf("unix recv %d bytes data with %d packages and checked done", recvRec.bytes, recvRec.count)
-	recvRec.mu.Unlock()
-
-	// Close
-	svr.Close()
-	cli.Close()
-
-	ok = waitForCondition(t, 5*time.Second, func() bool {
-		return len(svr.GetConnections()) == 0 && len(cli.GetConnections()) == 0
-	})
-	assert.True(t, ok, "all connections should be cleaned up")
+	path := getUnixSocketPath(t)
+	defer os.Remove(path)
+	address := "unix://" + path
+	runIoStreamBasic(t, address, []string{address, address, address})
 }
 
 // ============================================================================
@@ -927,68 +717,9 @@ func TestIoStreamUnixResetByServer(t *testing.T) {
 // TestIoStreamUnixSizeExtended verifies send/receive buffer size limits on Unix sockets.
 func TestIoStreamUnixSizeExtended(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix socket test skipped on Windows")
+		t.Skip("Unix socket test runs on Unix")
 	}
-
-	sockPath := getUnixSocketPath(t)
-	defer os.Remove(sockPath)
-
-	listenAddr := "unix://" + sockPath
-
-	conf := &IoStreamConfigure{}
-	SetDefaultIoStreamConfigure(conf)
-	conf.SendBufferLimitSize = conf.ReceiveBufferLimitSize + 1
-
-	ctx := context.Background()
-	svr := NewIoStreamChannel(ctx, conf)
-	cli := NewIoStreamChannel(ctx, conf)
-
-	var connectedCount atomic.Int32
-
-	svr.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeAccepted,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			connectedCount.Add(1)
-		})
-
-	cli.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeConnected,
-		func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-			connectedCount.Add(1)
-		})
-
-	// Listen
-	errCode := svr.Listen(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
-
-	// Connect
-	conn1, errCode := cli.Connect(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
-	assert.NotNil(t, conn1)
-
-	// Wait for connection
-	ok := waitForCondition(t, 5*time.Second, func() bool {
-		return connectedCount.Load() >= 2
-	})
-	assert.True(t, ok, "should establish connection")
-
-	testBuf := getTestBuffer()
-
-	// Sending data larger than send_buffer_limit_size should fail
-	oversizedBuf := make([]byte, conf.SendBufferLimitSize+1)
-	copy(oversizedBuf, testBuf)
-	errCode = cli.Send(conn1, oversizedBuf)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_INVALID_SIZE, errCode,
-		"send larger than send_buffer_limit_size should return EN_ATBUS_ERR_INVALID_SIZE")
-
-	// Sending at exactly send_buffer_limit_size should succeed
-	exactBuf := make([]byte, conf.SendBufferLimitSize)
-	copy(exactBuf, testBuf)
-	errCode = cli.Send(conn1, exactBuf)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode,
-		"send at send_buffer_limit_size should succeed")
-
-	// Cleanup
-	cli.Close()
-	svr.Close()
+	testIoStreamReceiveSizeLimits(t, "unix://"+getUnixSocketPath(t))
 }
 
 // ============================================================================
@@ -1369,7 +1100,78 @@ func TestIoStreamInvalidAddress(t *testing.T) {
 // Disconnect nil Connection Test
 // ============================================================================
 
-// TestIoStreamDisconnectNil verifies Disconnect handles nil connection.
+// Closing the transport before two disconnect requests must emit one notification.
+func TestIoStreamTcpDisconnectAfterTransportClose(t *testing.T) {
+	addr := fmt.Sprintf("ipv4://127.0.0.1:%d", getFreePort(t))
+	server := NewIoStreamChannel(context.Background(), nil)
+	client := NewIoStreamChannel(context.Background(), nil)
+	t.Cleanup(func() { client.Close(); server.Close() })
+	var callbacks atomic.Int32
+	client.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeDisconnected,
+		func(types.IoStreamChannel, types.IoStreamConnection, int32, interface{}) { callbacks.Add(1) })
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.Listen(addr))
+	connection, status := client.Connect(addr)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, status)
+	require.Len(t, client.GetConnections(), 1)
+	require.Eventually(t, func() bool { return len(server.GetConnections()) == 1 }, 3*time.Second, time.Millisecond)
+	require.NoError(t, connection.(*IoStreamConnection).conn.Close())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.Disconnect(connection))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.Disconnect(connection))
+	require.Eventually(t, func() bool { return callbacks.Load() == 1 && len(client.GetConnections()) == 0 }, 3*time.Second, time.Millisecond)
+	client.Close()
+	server.Close()
+	require.Equal(t, int32(1), callbacks.Load())
+	require.Empty(t, server.GetConnections())
+}
+
+// A transport obtained before shutdown can reach pool registration after Close.
+func TestIoStreamRejectsLateTransport(t *testing.T) {
+	c := NewIoStreamChannel(context.Background(), nil)
+	c.Close()
+	local, peer := net.Pipe()
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(time.Second)))
+	defer local.Close()
+	defer peer.Close()
+	addr, ok := channel_utility.MakeAddress("ipv4://127.0.0.1:1234")
+	require.True(t, ok)
+	require.Nil(t, c.createConnection(local, addr, IoStreamConnectionFlagAccept))
+	require.Empty(t, c.GetConnections())
+	var b [1]byte
+	_, err := peer.Read(b[:])
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestIoStreamCloseDuringListen(t *testing.T) {
+	c := NewIoStreamChannel(context.Background(), nil)
+	endpoint := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	listened := make(chan error_code.ErrorType, 1)
+	closed := make(chan error_code.ErrorType, 1)
+
+	// Hold registration until the socket is bound and Close has marked the channel.
+	c.mu.Lock()
+	go func() { listened <- c.Listen("ipv4://" + endpoint) }()
+	bound := waitForCondition(t, 5*time.Second, func() bool {
+		conn, err := net.DialTimeout("tcp4", endpoint, 50*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	})
+	go func() { closed <- c.Close() }()
+	closing := waitForCondition(t, 5*time.Second, c.closed.Load)
+	c.mu.Unlock()
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, <-closed)
+	result := <-listened
+	require.True(t, bound && closing, "listen and close must overlap")
+	require.Equal(t, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING, result)
+	require.Empty(t, c.listeners)
+	rebound, err := net.Listen("tcp4", endpoint)
+	require.NoError(t, err)
+	rebound.Close()
+}
+
 func TestIoStreamDisconnectNil(t *testing.T) {
 	ctx := context.Background()
 	ch := NewIoStreamChannel(ctx, nil)

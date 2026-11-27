@@ -208,8 +208,12 @@ func TestNodeRegParity_Timeout(t *testing.T) {
 	invalidConnCount := 0
 	var invalidConnStatus error_code.ErrorType
 
-	onNewConn := func(_ types.Node, _ types.Connection) error_code.ErrorType {
+	accepted := false
+	onNewConn := func(n types.Node, _ types.Connection) error_code.ErrorType {
 		newConnCount++
+		if n == node2 {
+			accepted = true
+		}
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 	onInvalidConn := func(_ types.Node, _ types.Connection, status error_code.ErrorType) error_code.ErrorType {
@@ -227,33 +231,21 @@ func TestNodeRegParity_Timeout(t *testing.T) {
 	ret := node1.Connect(getFirstListenAddr(t, node2))
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	// Wait for new connection (at least one side should fire)
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return newConnCount >= 1
-	}, node1, node2)
-	assert.GreaterOrEqual(t, newConnCount, 1)
-
-	// If registration completed before timeout check, that's also acceptable
-	if node1.IsEndpointAvailable(node2.GetId()) && node2.IsEndpointAvailable(node1.GetId()) {
-		t.Log("Registration completed before timeout check, skipping timeout verification")
-		return
-	}
-
-	// Advance time past the idle timeout to trigger connection timeout
-	futureTime := time.Now().Add(conf.FirstIdleTimeout + 3*time.Second)
-	node1.Proc(futureTime)
-	node2.Proc(futureTime)
-
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return invalidConnCount >= 1
-	}, node1, node2)
-	assert.GreaterOrEqual(t, invalidConnCount, 1)
-
-	// The status should be timeout or connection-closed
-	assert.True(t,
-		invalidConnStatus == error_code.EN_ATBUS_ERR_NODE_TIMEOUT ||
-			invalidConnStatus == error_code.ErrorType(-604),
-		"Expected EN_ATBUS_ERR_NODE_TIMEOUT or -604, got %d", invalidConnStatus)
+	waitForNodeCondition(t, 3*time.Second, func() bool { return newConnCount > 0 }, node1)
+	require.Positive(t, newConnCount)
+	require.Positive(t, node1.GetConnectionTimerSize())
+	node1.Proc(time.Now().Add(conf.FirstIdleTimeout + 3*time.Second))
+	require.Positive(t, invalidConnCount)
+	require.Equal(t, error_code.EN_ATBUS_ERR_NODE_TIMEOUT, invalidConnStatus)
+	// Accept and disconnect events arrive asynchronously on the peer. Advance
+	// both clocks until it has observed the connection and released its timer.
+	now := time.Now().Add(conf.FirstIdleTimeout + 3*time.Second)
+	require.Eventually(t, func() bool {
+		now = now.Add(conf.FirstIdleTimeout + time.Second)
+		node1.Proc(now)
+		node2.Proc(now)
+		return accepted && node1.GetConnectionTimerSize() == 0 && node2.GetConnectionTimerSize() == 0
+	}, 3*time.Second, time.Millisecond)
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +255,7 @@ func TestNodeRegParity_Timeout(t *testing.T) {
 func TestNodeRegParity_MessageSizeLimit(t *testing.T) {
 	var conf types.NodeConfigure
 	types.SetDefaultNodeConfigure(&conf)
-	conf.MessageSize = 64 * 1024 // Use 64KB to assure overhead doesn't cause false failures
+	conf.MessageSize = 4 * 1024
 	conf.AccessTokens = [][]byte{[]byte("test access token")}
 
 	node1, _ := setupListeningNode(t, 0x12345678, &conf)
@@ -278,7 +270,7 @@ func TestNodeRegParity_MessageSizeLimit(t *testing.T) {
 		return node1.IsEndpointAvailable(node2.GetId()) && node2.IsEndpointAvailable(node1.GetId())
 	}, node1, node2)
 
-	// Send small data — should succeed
+	// Exercise the exact payload boundary through a live connection.
 	recvCount := 0
 	var recvData string
 	node2.SetEventHandleOnForwardRequest(func(_ types.Node, _ types.Endpoint, _ types.Connection, _ *types.Message, content []byte) error_code.ErrorType {
@@ -287,19 +279,26 @@ func TestNodeRegParity_MessageSizeLimit(t *testing.T) {
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	})
 
-	smallPayload := strings.Repeat("a", 1024)
-	ret = node1.SendData(node2.GetId(), 0, []byte(smallPayload))
+	limitPayload := strings.Repeat("a", int(conf.MessageSize))
+	ret = node1.SendData(node2.GetId(), 0, []byte(limitPayload))
 	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
 	waitForNodeCondition(t, 8*time.Second, func() bool {
 		return recvCount > 0
 	}, node1, node2)
-	assert.Equal(t, smallPayload, recvData)
+	assert.Equal(t, limitPayload, recvData)
 
 	// Send data exceeding max size — should be rejected at SendData level
 	oversizedPayload := strings.Repeat("b", int(conf.MessageSize)+1)
 	ret = node1.SendData(node2.GetId(), 0, []byte(oversizedPayload))
 	assert.Equal(t, error_code.EN_ATBUS_ERR_INVALID_SIZE, ret)
+
+	id1, id2 := node1.GetId(), node2.GetId()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Shutdown(error_code.EN_ATBUS_ERR_SUCCESS))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Shutdown(error_code.EN_ATBUS_ERR_SUCCESS))
+	_, code := node1.Poll()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+	waitForNodeCondition(t, 8*time.Second, func() bool { return node1.GetEndpoint(id2) == nil && node2.GetEndpoint(id1) == nil }, node2)
 }
 
 // ---------------------------------------------------------------------------
@@ -471,22 +470,44 @@ func TestNodeRegParity_RegPcSuccess(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 	t.Cleanup(func() { downstreamNode.Reset() })
 
-	// Wait for at least one successful registration on either side
 	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return upstreamRegisterCount > 0 || downstreamRegisterCount > 0
+		return upstreamNode.IsEndpointAvailable(downstreamNode.GetId()) && downstreamNode.IsEndpointAvailable(upstreamNode.GetId())
 	}, upstreamNode, &downstreamNode)
-
-	// Either side should have seen a successful registration
-	totalRegCount := upstreamRegisterCount + downstreamRegisterCount
-	assert.Greater(t, totalRegCount, 0, "At least one successful registration should occur")
-
-	// The upstream should eventually see the downstream as an endpoint
-	if upstreamNode.GetEndpoint(downstreamNode.GetId()) != nil {
-		t.Log("Upstream sees downstream endpoint")
+	require.Positive(t, upstreamRegisterCount+downstreamRegisterCount)
+	require.True(t, upstreamNode.GetTopologyRegistry().UpdatePeer(downstreamNode.GetId(), upstreamNode.GetId(), nil))
+	getDataConnFn := func(from types.Endpoint, to types.Endpoint) types.Connection {
+		return from.GetDataConnection(to, true)
 	}
-	if downstreamNode.GetEndpoint(upstreamNode.GetId()) != nil {
-		t.Log("Downstream sees upstream endpoint")
+	removed := 0
+	for _, pair := range []struct {
+		local, peer *Node
+		relation    types.TopologyRelationType
+	}{
+		{upstreamNode, &downstreamNode, types.TopologyRelationType_ImmediateDownstream},
+		{&downstreamNode, upstreamNode, types.TopologyRelationType_ImmediateUpstream},
+	} {
+		relation, hop := pair.local.GetTopologyRelation(pair.peer.GetId())
+		require.Equal(t, pair.relation, relation)
+		require.NotNil(t, hop)
+		require.Equal(t, pair.peer.GetId(), hop.GetBusId())
+		code, ep, conn, route := pair.local.GetPeerChannel(pair.peer.GetId(), getDataConnFn, nil)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+		require.NotNil(t, ep)
+		require.NotNil(t, conn)
+		require.Same(t, hop, route)
+		require.False(t, ep.GetStatisticCreatedTime().IsZero())
+		require.NotEmpty(t, ep.GetHashCode())
+		require.Equal(t, pair.peer.GetSelfEndpoint().GetHashCode(), ep.GetHashCode())
+		pair.local.SetEventHandleOnRemoveEndpoint(func(types.Node, types.Endpoint, error_code.ErrorType) error_code.ErrorType {
+			removed++
+			return error_code.EN_ATBUS_ERR_SUCCESS
+		})
 	}
+	for _, pair := range [][2]*Node{{upstreamNode, &downstreamNode}, {&downstreamNode, upstreamNode}} {
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, pair[0].Disconnect(pair[1].GetId()))
+		require.Equal(t, error_code.EN_ATBUS_ERR_ATNODE_NOT_FOUND, pair[0].Disconnect(pair[1].GetId()))
+	}
+	require.GreaterOrEqual(t, removed, 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -501,32 +522,29 @@ func TestNodeRegParity_OnCloseConnectionNormal(t *testing.T) {
 	node2, _ := setupListeningNode(t, 0x12356789, &conf)
 	t.Cleanup(func() { node1.Reset(); node2.Reset() })
 
-	closeConnCount := 0
-	onCloseConn := func(_ types.Node, _ types.Endpoint, _ types.Connection) error_code.ErrorType {
-		closeConnCount++
+	counts := map[types.Node]int{}
+	onClose := func(n types.Node, _ types.Endpoint, _ types.Connection) error_code.ErrorType {
+		counts[n]++
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
-	node1.SetEventHandleOnCloseConnection(onCloseConn)
-	node2.SetEventHandleOnCloseConnection(onCloseConn)
-
-	// Connect peers
-	node1.Connect(getFirstListenAddr(t, node2))
-
+	node1.SetEventHandleOnCloseConnection(onClose)
+	node2.SetEventHandleOnCloseConnection(onClose)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Connect(getFirstListenAddr(t, node2)))
 	waitForNodeCondition(t, 8*time.Second, func() bool {
 		return node1.IsEndpointAvailable(node2.GetId()) && node2.IsEndpointAvailable(node1.GetId())
 	}, node1, node2)
-
-	// Reset node1 (Go Shutdown only sets a flag; not equivalent to C++ close)
-	beforeClose := closeConnCount
-	node1Id := node1.GetId()
-	node1.Reset()
-
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return !node2.IsEndpointAvailable(node1Id)
-	}, node2)
-
-	assert.Greater(t, closeConnCount, beforeClose,
-		"Close connection callback should fire after peer reset")
+	delivered := false
+	node2.SetEventHandleOnForwardRequest(func(_ types.Node, _ types.Endpoint, _ types.Connection, _ *types.Message, data []byte) error_code.ErrorType {
+		delivered = string(data) == "test data"
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	})
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.SendData(node2.GetId(), 0, []byte("test data")))
+	waitForNodeCondition(t, 8*time.Second, func() bool { return delivered }, node1, node2)
+	before1, before2 := counts[node1], counts[node2]
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Shutdown(error_code.EN_ATBUS_ERR_SUCCESS))
+	_, code := node1.Poll()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+	waitForNodeCondition(t, 8*time.Second, func() bool { return counts[node1] > before1 && counts[node2] > before2 }, node2)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,32 +559,20 @@ func TestNodeRegParity_OnCloseConnectionByPeer(t *testing.T) {
 	node2, _ := setupListeningNode(t, 0x12356789, &conf)
 	t.Cleanup(func() { node1.Reset(); node2.Reset() })
 
-	closeConnCount := 0
-	onCloseConn := func(_ types.Node, _ types.Endpoint, _ types.Connection) error_code.ErrorType {
-		closeConnCount++
+	counts := map[types.Node]int{}
+	onClose := func(n types.Node, _ types.Endpoint, _ types.Connection) error_code.ErrorType {
+		counts[n]++
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
-	node1.SetEventHandleOnCloseConnection(onCloseConn)
-	node2.SetEventHandleOnCloseConnection(onCloseConn)
-
-	// Connect peers
-	node1.Connect(getFirstListenAddr(t, node2))
-
+	node1.SetEventHandleOnCloseConnection(onClose)
+	node2.SetEventHandleOnCloseConnection(onClose)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Connect(getFirstListenAddr(t, node2)))
 	waitForNodeCondition(t, 8*time.Second, func() bool {
 		return node1.IsEndpointAvailable(node2.GetId()) && node2.IsEndpointAvailable(node1.GetId())
 	}, node1, node2)
-
-	// Reset node2 (simulates peer dropping)
-	beforeClose := closeConnCount
-	node2Id := node2.GetId()
-	node2.Reset()
-
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return !node1.IsEndpointAvailable(node2Id)
-	}, node1)
-
-	assert.Greater(t, closeConnCount, beforeClose,
-		"Close connection callback should fire when peer resets")
+	before := counts[node2]
+	node1.Reset()
+	waitForNodeCondition(t, 8*time.Second, func() bool { return counts[node2] > before }, node2)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,16 +654,16 @@ func TestNodeRegParity_OnTopologyUpstreamSet(t *testing.T) {
 	ret = downstreamNode.Listen(dsAddr)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	topologyUpdateCount := 0
-	downstreamNode.SetEventHandleOnTopologyUpdateUpstream(func(_ types.Node, _ types.TopologyPeer, upstream types.TopologyPeer, _ *types.TopologyData) error_code.ErrorType {
-		topologyUpdateCount++
-		return error_code.EN_ATBUS_ERR_SUCCESS
-	})
-
-	registerCount := 0
-	downstreamNode.SetEventHandleOnRegister(func(_ types.Node, _ types.Endpoint, _ types.Connection, status error_code.ErrorType) error_code.ErrorType {
-		if status == error_code.EN_ATBUS_ERR_SUCCESS {
-			registerCount++
+	var selfID, upstreamID types.BusIdType
+	updates := 0
+	downstreamNode.SetEventHandleOnTopologyUpdateUpstream(func(_ types.Node, self, upstream types.TopologyPeer, _ *types.TopologyData) error_code.ErrorType {
+		updates++
+		if self != nil {
+			selfID = self.GetBusId()
+		}
+		upstreamID = 0
+		if upstream != nil {
+			upstreamID = upstream.GetBusId()
 		}
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	})
@@ -666,15 +672,10 @@ func TestNodeRegParity_OnTopologyUpstreamSet(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 	t.Cleanup(func() { downstreamNode.Reset() })
 
-	// Wait for registration to complete
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return registerCount > 0 || topologyUpdateCount > 0
-	}, upstreamNode, &downstreamNode)
-
-	// At minimum, the registration should succeed. Topology update is expected
-	// when SetTopologyUpstream is called during register_rsp processing.
-	assert.True(t, registerCount > 0 || topologyUpdateCount > 0,
-		"Either registration or topology update should fire (reg=%d, topo=%d)", registerCount, topologyUpdateCount)
+	waitForNodeCondition(t, 8*time.Second, func() bool { return updates > 0 && downstreamNode.GetState() == types.NodeState_Running }, upstreamNode, &downstreamNode)
+	require.Positive(t, updates)
+	require.Equal(t, downstreamNode.GetId(), selfID)
+	require.Equal(t, upstreamNode.GetId(), upstreamID)
 }
 
 // ---------------------------------------------------------------------------
@@ -700,17 +701,17 @@ func TestNodeRegParity_OnTopologyUpstreamClear(t *testing.T) {
 	ret = downstreamNode.Listen(dsAddr)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	registerCount := 0
-	downstreamNode.SetEventHandleOnRegister(func(_ types.Node, _ types.Endpoint, _ types.Connection, status error_code.ErrorType) error_code.ErrorType {
-		if status == error_code.EN_ATBUS_ERR_SUCCESS {
-			registerCount++
+	var selfID, upstreamID types.BusIdType
+	updates := 0
+	downstreamNode.SetEventHandleOnTopologyUpdateUpstream(func(_ types.Node, self, upstream types.TopologyPeer, _ *types.TopologyData) error_code.ErrorType {
+		updates++
+		if self != nil {
+			selfID = self.GetBusId()
 		}
-		return error_code.EN_ATBUS_ERR_SUCCESS
-	})
-
-	closeConnCount := 0
-	downstreamNode.SetEventHandleOnCloseConnection(func(_ types.Node, _ types.Endpoint, _ types.Connection) error_code.ErrorType {
-		closeConnCount++
+		upstreamID = 0
+		if upstream != nil {
+			upstreamID = upstream.GetBusId()
+		}
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	})
 
@@ -718,26 +719,19 @@ func TestNodeRegParity_OnTopologyUpstreamClear(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 	t.Cleanup(func() { downstreamNode.Reset() })
 
-	// Wait for registration (at least one side sees it)
-	waitForNodeCondition(t, 8*time.Second, func() bool {
-		return registerCount > 0
-	}, upstreamNode, &downstreamNode)
-
-	if registerCount == 0 {
-		t.Skip("Upstream registration did not complete, cannot test upstream clear")
-	}
-
-	// Now reset the upstream node
+	waitForNodeCondition(t, 8*time.Second, func() bool { return updates > 0 && downstreamNode.GetState() == types.NodeState_Running }, upstreamNode, &downstreamNode)
+	require.Positive(t, updates)
+	require.Equal(t, downstreamNode.GetId(), selfID)
+	require.Equal(t, upstreamNode.GetId(), upstreamID)
+	countAfterConnect := updates
 	upstreamNode.Reset()
-
-	// Poll the downstream until its socket-disconnect callback has been dispatched.
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) && closeConnCount == 0 {
-		downstreamNode.Poll()
-		time.Sleep(10 * time.Millisecond)
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return updates > countAfterConnect || downstreamNode.GetState() == types.NodeState_LostUpstream
+	}, &downstreamNode)
+	require.True(t, updates > countAfterConnect || downstreamNode.GetState() == types.NodeState_LostUpstream)
+	if updates > countAfterConnect {
+		require.Zero(t, upstreamID)
 	}
-
-	assert.Greater(t, closeConnCount, 0, "Downstream should detect upstream disconnect")
 }
 
 // ---------------------------------------------------------------------------

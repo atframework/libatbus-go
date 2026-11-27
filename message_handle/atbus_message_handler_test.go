@@ -1,6 +1,7 @@
 package libatbus_message_handle
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -190,20 +191,13 @@ func (c *mockConnectionContext) SetupCryptoWithKey(algorithm protocol.ATBUS_CRYP
 // ============================================================================
 
 func TestGetBodyName(t *testing.T) {
-	// Test: GetBodyName returns correct names for known message types
-	// Use protocol constants for field numbers instead of hardcoded values
-	testCases := []struct {
-		fieldNum int
-		expected string
-	}{
-		{int(protocol.MessageBody_EnMessageTypeID_NodePingReq), "atframework.atbus.protocol.message_body.node_ping_req"},
-		{int(protocol.MessageBody_EnMessageTypeID_NodePongRsp), "atframework.atbus.protocol.message_body.node_pong_rsp"},
+	descriptor := (&protocol.MessageBody{}).ProtoReflect().Descriptor()
+	for i := 0; i < descriptor.Fields().Len(); i++ {
+		field := descriptor.Fields().Get(i)
+		require.Equal(t, string(field.FullName()), GetBodyName(int(field.Number())))
 	}
-
-	for _, tc := range testCases {
-		name := GetBodyName(tc.fieldNum)
-		assert.NotEqual(t, "Unknown", name, "Field %d should have a known name", tc.fieldNum)
-	}
+	require.Equal(t, "Unknown", GetBodyName(0))
+	require.Equal(t, "Unknown", GetBodyName(1000000))
 }
 
 func TestGetBodyNameUnknown(t *testing.T) {
@@ -371,9 +365,12 @@ func TestCalculateAccessDataSignatureLongToken(t *testing.T) {
 	}
 	plaintext := "test_plaintext"
 
-	// Should not panic
-	sig := CalculateAccessDataSignature(ad, longToken, plaintext)
-	assert.Len(t, sig, 32)
+	const limit = 32868
+	for _, size := range []int{limit - 1, limit, limit + 1, len(longToken)} {
+		mac := hmac.New(sha256.New, longToken[:min(size, limit)])
+		mac.Write([]byte(plaintext))
+		assert.Equal(t, mac.Sum(nil), CalculateAccessDataSignature(ad, longToken[:size], plaintext), "token size %d", size)
+	}
 }
 
 func TestGenerateAccessDataEmptyTokens(t *testing.T) {
@@ -445,12 +442,14 @@ func TestCrossLangAccessDataIndexIntegrity(t *testing.T) {
 	loadJSONTestData(t, "index.json", &index)
 	require.Len(t, index.Functions, 3, "index.json should describe all 3 access_data functions")
 
+	var listed []string
 	totalVectors := 0
 	for _, fn := range index.Functions {
 		for _, rawEntry := range fn.TestFiles {
 			totalVectors++
 			var singleFile string
 			if err := json.Unmarshal(rawEntry, &singleFile); err == nil {
+				listed = append(listed, singleFile)
 				_, statErr := os.Stat(filepath.Join("testdata", singleFile))
 				assert.NoError(t, statErr, "Missing testdata file: %s", singleFile)
 				continue
@@ -461,6 +460,7 @@ func TestCrossLangAccessDataIndexIntegrity(t *testing.T) {
 				Binary string `json:"binary"`
 			}
 			require.NoError(t, json.Unmarshal(rawEntry, &pair))
+			listed = append(listed, pair.JSON, pair.Binary)
 			_, statErr := os.Stat(filepath.Join("testdata", pair.JSON))
 			assert.NoError(t, statErr, "Missing testdata JSON file: %s", pair.JSON)
 			_, statErr = os.Stat(filepath.Join("testdata", pair.Binary))
@@ -468,6 +468,16 @@ func TestCrossLangAccessDataIndexIntegrity(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 10, totalVectors, "Expected 10 access_data cross-language vectors in index.json")
+	entries, err := os.ReadDir("testdata")
+	require.NoError(t, err)
+	var generated []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "index.json" && (filepath.Ext(name) == ".json" || filepath.Ext(name) == ".bytes") {
+			generated = append(generated, name)
+		}
+	}
+	require.ElementsMatch(t, generated, listed)
 }
 
 // TestCrossLangAccessDataPlaintext verifies all make_access_data_plaintext vectors
@@ -721,22 +731,22 @@ func TestCrossLangAccessDataFull(t *testing.T) {
 // mockEndpoint is a minimal mock for types.Endpoint.
 type mockEndpoint struct{}
 
-func (e *mockEndpoint) GetOwner() types.Node                                     { return nil }
-func (e *mockEndpoint) GetId() types.BusIdType                                   { return 0x42 }
-func (e *mockEndpoint) Reset()                                                   {}
+func (e *mockEndpoint) GetOwner() types.Node                                      { return nil }
+func (e *mockEndpoint) GetId() types.BusIdType                                    { return 0x42 }
+func (e *mockEndpoint) Reset()                                                    {}
 func (e *mockEndpoint) Reload(string, string, map[string]string, []types.Gateway) {}
 func (e *mockEndpoint) ReloadFromProtocol(string, string, map[string]string, []*protocol.ChannelData) {
 }
-func (e *mockEndpoint) GetPid() int32                         { return 0 }
-func (e *mockEndpoint) GetHostname() string                   { return "" }
-func (e *mockEndpoint) GetHashCode() string                   { return "" }
-func (e *mockEndpoint) UpdateHashCode(code string)            {}
-func (e *mockEndpoint) GetScope() string                      { return "" }
-func (e *mockEndpoint) GetNamespace() string                  { return "" }
-func (e *mockEndpoint) GetLabels() map[string]string          { return nil }
-func (e *mockEndpoint) GetFlag(flag types.EndpointFlag) bool  { return false }
-func (e *mockEndpoint) GetFlags() uint32                      { return 0 }
-func (e *mockEndpoint) SetFlag(f types.EndpointFlag, v bool)  {}
+func (e *mockEndpoint) GetPid() int32                                            { return 0 }
+func (e *mockEndpoint) GetHostname() string                                      { return "" }
+func (e *mockEndpoint) GetHashCode() string                                      { return "" }
+func (e *mockEndpoint) UpdateHashCode(code string)                               {}
+func (e *mockEndpoint) GetScope() string                                         { return "" }
+func (e *mockEndpoint) GetNamespace() string                                     { return "" }
+func (e *mockEndpoint) GetLabels() map[string]string                             { return nil }
+func (e *mockEndpoint) GetFlag(flag types.EndpointFlag) bool                     { return false }
+func (e *mockEndpoint) GetFlags() uint32                                         { return 0 }
+func (e *mockEndpoint) SetFlag(f types.EndpointFlag, v bool)                     {}
 func (e *mockEndpoint) AddConnection(conn types.Connection, forceData bool) bool { return false }
 func (e *mockEndpoint) RemoveConnection(conn types.Connection) bool              { return false }
 func (e *mockEndpoint) IsAvailable() bool                                        { return true }

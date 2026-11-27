@@ -6,6 +6,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Callers can retain an unknown error's text across subsequent and concurrent lookups.
+func TestLibatbusStrerrorRetainedResults(t *testing.T) {
+	const known = "EN_ATBUS_ERR_SUCCESS(0): success"
+	const unknown = "ATBUS_ERROR_TYPE(12345): unknown"
+	saved := LibatbusStrerror(ErrorType(12345))
+	done := make(chan string, 1)
+	go func() { done <- LibatbusStrerror(ErrorType(12346)) }()
+	assert.Equal(t, known, LibatbusStrerror(EN_ATBUS_ERR_SUCCESS))
+	assert.Equal(t, "ATBUS_ERROR_TYPE(12346): unknown", <-done)
+	assert.Equal(t, unknown, saved)
+	assert.Equal(t, known, LibatbusStrerror(EN_ATBUS_ERR_SUCCESS))
+}
+
 func TestLibatbusStrerrorKnownCodes(t *testing.T) {
 	// Arrange - test all known error codes
 	cases := []struct {

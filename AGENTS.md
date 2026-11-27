@@ -63,9 +63,10 @@ libatbus-go/
 │   ├── atbus_common_types.go    # Shared constants and types
 │   └── channel_address.go       # Channel address types
 ├── tools/                       # Utilities
-│   └── testdata_sync_custom_cmd/  # Cross-language test vector sync tool
-├── Plan.md                      # Functional completion plan (Chinese)
-└── UnitTestPlan.md              # Unit test execution plan (Chinese)
+│   ├── check_cpp_test_coverage.py  # Compare C++ cases, fixtures and Go test results
+│   ├── cpp_test_cases.tsv          # C++ cases and their Go tests
+│   └── testdata_sync_custom_cmd/   # Cross-language test vector sync tool
+└── Plan.md                      # Functional completion plan (Chinese)
 ```
 
 ## Architecture

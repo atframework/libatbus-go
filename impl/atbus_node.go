@@ -447,6 +447,10 @@ func (n *Node) onIoStreamReceived(ioConn types.IoStreamConnection, status int32,
 		return
 	}
 
+	if status < 0 {
+		n.onReceiveMessage(conn, nil, int(status), error_code.ErrorType(status))
+		return
+	}
 	if len(payload) == 0 {
 		return
 	}
@@ -1226,6 +1230,8 @@ func (n *Node) Disconnect(id types.BusIdType) error_code.ErrorType {
 
 	if n.upstream.node != nil && n.upstream.node.GetId() == id {
 		ep := n.upstream.node
+		n.upstream.node = nil
+		ep.ClearPingTimer()
 
 		// event
 		handle := n.eventHandleset.OnEndpointRemoved
@@ -1241,9 +1247,10 @@ func (n *Node) Disconnect(id types.BusIdType) error_code.ErrorType {
 	}
 
 	ep := n.findRouteEndpoint(&n.nodeRoute, id)
-	if ep != nil {
-		n.removeChild(&n.nodeRoute, id, nil, false)
+	if ep == nil || ep.GetId() != id {
+		return error_code.EN_ATBUS_ERR_ATNODE_NOT_FOUND
 	}
+	n.removeChild(&n.nodeRoute, id, ep, false)
 	ep.Reset()
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
