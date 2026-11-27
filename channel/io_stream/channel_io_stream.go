@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -82,8 +83,8 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	// For unix/pipe sockets, handle path locking and cleanup
-	if network == "pipe" {
+	// Filesystem sockets need path locking and cleanup.
+	if network == "pipe" && !IsNativePipePath(address) {
 		// Resolve to absolute path for consistency
 		absPath, err := filepath.Abs(address)
 		if err == nil {
@@ -119,13 +120,7 @@ func (c *IoStreamChannel) Listen(addr string) error_code.ErrorType {
 		}
 	}
 
-	// Translate "pipe" to Go-compatible network type for this platform
-	goNetwork := network
-	if network == "pipe" {
-		goNetwork = pipeGoNetworkType()
-	}
-
-	listener, err := net.Listen(goNetwork, address)
+	listener, err := listenStream(network, address)
 	if err != nil {
 		// Unlock if we locked
 		c.mu.Lock()
@@ -170,13 +165,7 @@ func (c *IoStreamChannel) Connect(addr string) (types.IoStreamConnection, error_
 		KeepAlive: c.conf.Keepalive,
 	}
 
-	// Translate "pipe" to Go-compatible network type for this platform
-	goNetwork := network
-	if network == "pipe" {
-		goNetwork = pipeGoNetworkType()
-	}
-
-	conn, err := dialer.DialContext(c.ctx, goNetwork, address)
+	conn, err := dialStream(c.ctx, &dialer, network, address)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
@@ -214,7 +203,7 @@ func (c *IoStreamChannel) Send(conn types.IoStreamConnection, data []byte) error
 	}
 
 	ioConn, ok := conn.(*IoStreamConnection)
-	if !ok || ioConn == nil || ioConn.closed.Load() {
+	if !ok || ioConn == nil || ioConn.channel != c || ioConn.closed.Load() {
 		return error_code.EN_ATBUS_ERR_CLOSING
 	}
 
@@ -235,12 +224,22 @@ func (c *IoStreamChannel) Send(conn types.IoStreamConnection, data []byte) error
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
 
-	// Send to write queue
+	if c.closed.Load() {
+		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
+	}
+	if ioConn.closed.Load() || ioConn.GetStatus() != IoStreamConnectionStatusConnected {
+		return error_code.EN_ATBUS_ERR_CLOSING
+	}
+
+	// writeQueue is intentionally never closed; teardown signals via closedCh so
+	// Send stays lock-free without risking a send-on-closed-channel panic.
 	select {
-	case ioConn.writeQueue <- frame:
-		return error_code.EN_ATBUS_ERR_SUCCESS
+	case <-ioConn.closedCh:
+		return error_code.EN_ATBUS_ERR_CLOSING
 	case <-c.ctx.Done():
 		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
+	case ioConn.writeQueue <- frame:
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	default:
 		// Queue is full
 		return error_code.EN_ATBUS_ERR_BUFF_LIMIT
@@ -394,7 +393,10 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 
 		n, err := conn.conn.Read(readBuf)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) || isPeerReset(err) {
+				if !c.closed.Load() && conn.GetStatus() == IoStreamConnectionStatusConnected {
+					conn.peerClosed.Store(true)
+				}
 				return
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -403,9 +405,9 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 				case <-c.ctx.Done():
 					return
 				default:
-					atomic.AddUint64(&conn.readEgainCount, 1)
+					egainCount := atomic.AddUint64(&conn.readEgainCount, 1)
 					atomic.AddUint64(&c.statisticReadNetEgainCount, 1)
-					if conn.readEgainCount > c.conf.MaxReadNetEgainCount {
+					if egainCount > c.conf.MaxReadNetEgainCount {
 						return
 					}
 					continue
@@ -418,6 +420,9 @@ func (c *IoStreamChannel) readLoop(conn *IoStreamConnection) {
 		if n == 0 {
 			continue
 		}
+
+		// Reset consecutive EAGAIN/timeout counter on successful read (matches C++ io_stream_on_recv_read_fn)
+		atomic.StoreUint64(&conn.readEgainCount, 0)
 
 		isFree := false
 		incoming := readBuf[:n]
@@ -494,6 +499,11 @@ func (c *IoStreamChannel) processReadHeadFrames(conn *IoStreamConnection) bool {
 			break
 		}
 
+		if msgLen > uint64(math.MaxInt-HashSize-vintSize) {
+			atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+			atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
+			return true
+		}
 		totalFrameSize := HashSize + vintSize + int(msgLen)
 
 		if buffLeftLen >= totalFrameSize {
@@ -507,15 +517,15 @@ func (c *IoStreamChannel) processReadHeadFrames(conn *IoStreamConnection) bool {
 			actualHash := CalculateHash(payload)
 
 			if actualHash != expectedHash {
-				atomic.AddUint64(&conn.checkHashFailedCount, 1)
+				count := atomic.AddUint64(&conn.checkHashFailedCount, 1)
 				atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
-				if conn.checkHashFailedCount > c.conf.MaxReadCheckHashFailedCount {
+				if count > c.conf.MaxReadCheckHashFailedCount {
 					isFree = true
 				}
 			} else if c.conf.ReceiveBufferLimitSize > 0 && msgLen > c.conf.ReceiveBufferLimitSize {
-				atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+				count := atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
 				atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-				if conn.checkBlockSizeFailedCount > c.conf.MaxReadCheckBlockSizeFailedCount {
+				if count > c.conf.MaxReadCheckBlockSizeFailedCount {
 					isFree = true
 				}
 			} else {
@@ -590,18 +600,18 @@ func (c *IoStreamChannel) processCompleteLargeFrame(conn *IoStreamConnection) bo
 	actualHash := CalculateHash(payload)
 
 	if actualHash != expectedHash {
-		atomic.AddUint64(&conn.checkHashFailedCount, 1)
+		count := atomic.AddUint64(&conn.checkHashFailedCount, 1)
 		atomic.AddUint64(&c.statisticCheckHashFailedCount, 1)
-		if conn.checkHashFailedCount > c.conf.MaxReadCheckHashFailedCount {
+		if count > c.conf.MaxReadCheckHashFailedCount {
 			return true
 		}
 		return false
 	}
 
 	if c.conf.ReceiveBufferLimitSize > 0 && uint64(lf.msgLen) > c.conf.ReceiveBufferLimitSize {
-		atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
+		count := atomic.AddUint64(&conn.checkBlockSizeFailedCount, 1)
 		atomic.AddUint64(&c.statisticCheckBlockSizeFailedCount, 1)
-		if conn.checkBlockSizeFailedCount > c.conf.MaxReadCheckBlockSizeFailedCount {
+		if count > c.conf.MaxReadCheckBlockSizeFailedCount {
 			return true
 		}
 		return false
@@ -625,11 +635,9 @@ func (c *IoStreamChannel) writeLoop(conn *IoStreamConnection) {
 		select {
 		case <-c.ctx.Done():
 			return
-		case data, ok := <-conn.writeQueue:
-			if !ok {
-				return
-			}
-
+		case <-conn.closedCh:
+			return
+		case data := <-conn.writeQueue:
 			if conn.closed.Load() {
 				return
 			}
@@ -702,11 +710,13 @@ func (c *IoStreamChannel) collectSmallWrites(conn *IoStreamConnection, first []b
 	totalSize := len(first)
 
 	for totalSize < MergeBufferMaxSize {
+		if conn.closed.Load() {
+			return frames
+		}
 		select {
-		case data, ok := <-conn.writeQueue:
-			if !ok {
-				return frames
-			}
+		case <-conn.closedCh:
+			return frames
+		case data := <-conn.writeQueue:
 			frames = append(frames, data)
 			totalSize += len(data)
 			if totalSize >= MergeBufferMaxSize {
@@ -780,11 +790,13 @@ func extractFramePayload(frame []byte) []byte {
 // This is called during graceful disconnect to flush buffered data before closing.
 func (c *IoStreamChannel) drainRemainingWrites(conn *IoStreamConnection) {
 	for {
+		if conn.closed.Load() {
+			return
+		}
 		select {
-		case data, ok := <-conn.writeQueue:
-			if !ok {
-				return
-			}
+		case <-conn.closedCh:
+			return
+		case data := <-conn.writeQueue:
 			if conn.closed.Load() {
 				return
 			}
@@ -803,12 +815,13 @@ func (c *IoStreamChannel) createConnection(conn net.Conn, addr *channel_utility.
 		channel:           c,
 		conn:              conn,
 		address:           addr,
-		status:            IoStreamConnectionStatusConnected,
-		flags:             uint32(flag),
 		readBufferManager: buffer.NewBufferManager(),
 		writeQueue:        make(chan []byte, DefaultWriteQueueSize),
 		disconnectCh:      make(chan struct{}),
+		closedCh:          make(chan struct{}),
 	}
+	ioConn.status.Store(int32(IoStreamConnectionStatusConnected))
+	ioConn.flags.Store(uint32(flag))
 
 	// Configure buffer manager
 	if c.conf.ReceiveBufferMaxSize > 0 {
@@ -835,17 +848,19 @@ func (c *IoStreamChannel) disconnectInternal(conn *IoStreamConnection, force boo
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	conn.mu.Lock()
-	if conn.status != IoStreamConnectionStatusConnected {
-		conn.mu.Unlock()
-		if force {
-			// Force close even if already disconnecting
-			return c.disconnectRun(conn)
+	for {
+		curStatus := conn.GetStatus()
+		if curStatus != IoStreamConnectionStatusConnected && curStatus != IoStreamConnectionStatusCreated {
+			if force {
+				// Force close even if already disconnecting
+				return c.disconnectRun(conn)
+			}
+			return error_code.EN_ATBUS_ERR_SUCCESS
 		}
-		return error_code.EN_ATBUS_ERR_SUCCESS
+		if conn.status.CompareAndSwap(int32(curStatus), int32(IoStreamConnectionStatusDisconnecting)) {
+			break
+		}
 	}
-	conn.status = IoStreamConnectionStatusDisconnecting
-	conn.mu.Unlock()
 
 	// if there is any writing data, closing this connection later
 	// (matches C++ io_stream_disconnect_internal: defer if kWriting && !force)
@@ -872,12 +887,8 @@ func (c *IoStreamChannel) disconnectRun(conn *IoStreamConnection) error_code.Err
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	conn.mu.Lock()
-	conn.flags |= uint32(IoStreamConnectionFlagClosing)
-	conn.mu.Unlock()
-
-	// Close the write queue
-	close(conn.writeQueue)
+	conn.SetFlag(IoStreamConnectionFlagClosing, true)
+	close(conn.closedCh)
 
 	// Close the underlying connection
 	if conn.conn != nil {
@@ -897,7 +908,7 @@ func (c *IoStreamChannel) disconnectRun(conn *IoStreamConnection) error_code.Err
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
-// resolveAddress converts a parsed address to network and address strings for net.Dial/Listen.
+// resolveAddress normalizes transport names before platform-specific network selection.
 func (c *IoStreamChannel) resolveAddress(addr *channel_utility.ChannelAddress) (network string, address string) {
 	scheme := strings.ToLower(addr.Scheme)
 

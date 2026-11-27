@@ -135,6 +135,14 @@ func (c *customCommandLoopbackConnection) GetAddress() types.ChannelAddress {
 	return c.address
 }
 
+func (c *customCommandLoopbackConnection) GetOriginAddress() string {
+	if c == nil || c.address == nil {
+		return ""
+	}
+
+	return c.address.GetAddress()
+}
+
 func (c *customCommandLoopbackConnection) IsConnected() bool {
 	return c != nil && c.status == types.ConnectionState_Connected
 }
@@ -826,11 +834,12 @@ func TestNodeMsgParity_PingPong(t *testing.T) {
 			node2.IsEndpointAvailable(node1.GetId())
 	}, &upstream, &node1, &node2)
 
-	// Run for ~8 simulated seconds with 80ms steps to trigger multiple ping/pong cycles
+	// Advance the timers and dispatch queued I/O until the upstream pong arrives.
+	ep1u, ok := node1.GetEndpoint(upstream.GetId()).(*Endpoint)
+	require.True(t, ok)
 	oldPong := pongCount
 	procTime := time.Now()
-	tickCount := 0
-	for pongCount-oldPong < 40 && tickCount < 1000 {
+	for tickCount := 0; ep1u.GetStatisticLastPong().IsZero() && tickCount < 1000; tickCount++ {
 		procTime = procTime.Add(80 * time.Millisecond)
 		node1.Poll()
 		node2.Poll()
@@ -838,7 +847,6 @@ func TestNodeMsgParity_PingPong(t *testing.T) {
 		node1.Proc(procTime)
 		node2.Proc(procTime)
 		upstream.Proc(procTime)
-		tickCount++
 		if tickCount%12 == 0 {
 			time.Sleep(1 * time.Millisecond) // yield to goroutines
 		}
@@ -849,13 +857,7 @@ func TestNodeMsgParity_PingPong(t *testing.T) {
 	assert.Greater(t, pongCount-oldPong, 0, "Expected at least some pongs")
 	assert.Greater(t, pingCount, 0, "Expected at least some pings")
 
-	// Pong timestamps on upstream-downstream pair (guaranteed to have ping timers)
-	ep1u := node1.GetEndpoint(upstream.GetId())
-	if ep1u != nil {
-		if epImpl, ok := ep1u.(*Endpoint); ok {
-			assert.False(t, epImpl.GetStatisticLastPong().IsZero(), "last_pong should be set on node1 for upstream")
-		}
-	}
+	assert.False(t, ep1u.GetStatisticLastPong().IsZero(), "last_pong should be set on node1 for upstream")
 }
 
 // TestNodeMsgParity_TransferAndConnect mirrors C++ atbus_node_msg::transfer_and_connect.

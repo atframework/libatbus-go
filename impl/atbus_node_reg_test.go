@@ -6,6 +6,8 @@
 package libatbus_impl
 
 import (
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,44 @@ import (
 	protocol "github.com/atframework/libatbus-go/protocol"
 	types "github.com/atframework/libatbus-go/types"
 )
+
+func TestRegistrationBacklogReleasesSlotAfterDisconnect(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	conf.BackLog = 1
+	n, address := setupListeningNode(t, 1, &conf)
+	t.Cleanup(func() { n.Reset() })
+	dial := func() net.Conn {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", strings.TrimPrefix(address, "ipv4://"), time.Second)
+		require.NoError(t, err)
+		t.Cleanup(func() { conn.Close() })
+		return conn
+	}
+	waitForPending := func(want int) {
+		t.Helper()
+		waitForNodeCondition(t, 3*time.Second, func() bool {
+			return n.GetConnectionTimerSize() == want
+		}, n)
+	}
+	first := dial()
+	waitForPending(1)
+	second := dial()
+	// Let the loop process the second accept while the first handshake is pending.
+	require.Eventually(t, func() bool {
+		return len(n.ioStreamEvents) > 0
+	}, 3*time.Second, time.Millisecond)
+	n.Poll()
+	require.NoError(t, second.SetReadDeadline(time.Now().Add(3*time.Second)))
+	var one [1]byte
+	_, err := second.Read(one[:])
+	require.ErrorIs(t, err, io.EOF)
+	assert.Equal(t, 1, n.GetConnectionTimerSize())
+	require.NoError(t, first.Close())
+	waitForPending(0)
+	dial()
+	waitForPending(1)
+}
 
 func TestSetHostnameWithForceMatchesCppRegCase(t *testing.T) {
 	// Arrange: preserve the global hostname cache so this test leaves no residue.
@@ -690,11 +730,10 @@ func TestNodeRegParity_OnTopologyUpstreamClear(t *testing.T) {
 	// Now reset the upstream node
 	upstreamNode.Reset()
 
-	// Wait for downstream to detect the disconnect.
-	// Don't pump the downstream via waitForNodeCondition — after upstream loss,
-	// the downstream may FatalShutdown (if not yet activated) making Proc fail.
+	// Poll the downstream until its socket-disconnect callback has been dispatched.
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) && closeConnCount == 0 {
+		downstreamNode.Poll()
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -1250,4 +1289,580 @@ func TestNodeRegParity_OnTopologyUpstreamChangeId(t *testing.T) {
 	assert.Greater(t, topologyUpdateCount, callbackBefore)
 	assert.Equal(t, upstream2.GetId(), topologyNewUpstreamId)
 	assert.NotEqual(t, firstUpstreamId, topologyNewUpstreamId)
+}
+
+// TestNodeRegParity_RegPcSuccessWithUnreachableUpstreamChannel mirrors C++
+// atbus_node_reg::reg_pc_success_with_unreachable_upstream_channel.
+func TestNodeRegParity_RegPcSuccessWithUnreachableUpstreamChannel(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	conf.PingInterval = 1 * time.Second
+
+	upstreamAddr := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	// 模拟上游和下游处于不同物理机
+	upstream.SetSelfHostname("test-host-a")
+	downstream.SetSelfHostname("test-host-b")
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &conf))
+
+	dsConf := conf
+	dsConf.UpstreamAddress = upstreamAddr
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	// 上游只监听本机回环地址（对处于其他物理机的下游不可达），下游不监听任何地址
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(upstreamAddr))
+
+	registerCount := 0
+	downstream.SetEventHandleOnRegister(func(_ types.Node, _ types.Endpoint, _ types.Connection, status error_code.ErrorType) error_code.ErrorType {
+		if status == error_code.EN_ATBUS_ERR_SUCCESS {
+			registerCount++
+		}
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	})
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return registerCount > 0 && downstream.IsEndpointAvailable(upstream.GetId())
+	}, upstream, downstream)
+
+	require.NotNil(t, downstream.GetEndpoint(upstream.GetId()))
+	assert.True(t, downstream.IsEndpointAvailable(upstream.GetId()))
+
+	// 再推进若干次 ping 周期的虚拟时间后，上游端点应保持存活且可用
+	procTime := time.Now().Add(time.Second)
+	for i := 0; i < 30; i++ {
+		procTime = procTime.Add(100 * time.Millisecond)
+		upstream.Poll()
+		upstream.Proc(procTime)
+		downstream.Poll()
+		downstream.Proc(procTime)
+		if i%5 == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	assert.Equal(t, types.NodeState_Running, downstream.GetState())
+	assert.NotNil(t, downstream.GetEndpoint(upstream.GetId()))
+	assert.True(t, downstream.IsEndpointAvailable(upstream.GetId()))
+}
+
+// TestNodeRegParity_RegWithWildcardUpstreamChannelCrossHost mirrors C++
+// atbus_node_reg::reg_with_wildcard_upstream_channel_cross_host.
+func TestNodeRegParity_RegWithWildcardUpstreamChannelCrossHost(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	conf.PingInterval = 1 * time.Second
+
+	upstreamAddr := reserveTCPListenAddress(t)
+	unreachableWildcardAddr := strings.Replace(reserveTCPListenAddress(t), "ipv4://127.0.0.1:", "ipv4://0.0.0.0:", 1)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upstream.SetSelfHostname("test-host-a")
+	downstream.SetSelfHostname("test-host-b")
+
+	// 上游对外仅通告不可达的通配地址 (0.0.0.0:<unusedPort>)，实际监听在 upstreamAddr
+	upConf := conf
+	upConf.Gateway = []types.Gateway{{Address: unreachableWildcardAddr}}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	// 下游不配置 upstream_address，通过手动连接发起注册
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &conf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(upstreamAddr))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Connect(upstreamAddr))
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId())
+	}, upstream, downstream)
+
+	ep := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, ep)
+	assert.True(t, downstream.IsEndpointAvailable(upstream.GetId()))
+	dataConn := downstream.self.GetDataConnection(ep, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, upstreamAddr, dataConn.GetAddress().GetAddress())
+
+	// 推进若干次 ping 周期后端点保持可用
+	procTime := time.Now().Add(time.Second)
+	for i := 0; i < 30; i++ {
+		procTime = procTime.Add(100 * time.Millisecond)
+		upstream.Poll()
+		upstream.Proc(procTime)
+		downstream.Poll()
+		downstream.Proc(procTime)
+		if i%5 == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	assert.NotNil(t, downstream.GetEndpoint(upstream.GetId()))
+	assert.True(t, downstream.IsEndpointAvailable(upstream.GetId()))
+}
+
+// TestNodeRegParity_ReconnectUpstreamRetryBackoff mirrors C++
+// atbus_node_reg::reconnect_upstream_retry_backoff.
+func TestNodeRegParity_ReconnectUpstreamRetryBackoff(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	retryGap := conf.RetryInterval
+	maxRetryGap := conf.MaxRetryInterval
+	require.Equal(t, 3*time.Second, retryGap)
+	require.Equal(t, 60*time.Second, maxRetryGap)
+
+	upstreamAddr := reserveTCPListenAddress(t)
+	downstreamAddr := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12356790, &conf))
+
+	dsConf := conf
+	dsConf.UpstreamAddress = upstreamAddr
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12345679, &dsConf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(upstreamAddr))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Listen(downstreamAddr))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.GetState() == types.NodeState_Running
+	}, upstream, downstream)
+	require.Equal(t, types.NodeState_Running, downstream.GetState())
+
+	// Helper: wait until downstream detects upstream disconnect and enters LostUpstream
+	waitLostUpstream := func(procT *time.Time) {
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			downstream.Poll()
+			if downstream.GetState() == types.NodeState_LostUpstream {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		require.Equal(t, types.NodeState_LostUpstream, downstream.GetState())
+		// First immediate reconnect attempt fails synchronously because upstream is down
+		*procT = downstream.GetTimerTick().Add(time.Second)
+		downstream.Proc(*procT)
+		assert.Equal(t, 0, downstream.GetConnectionTimerSize())
+		assert.Equal(t, types.NodeState_LostUpstream, downstream.GetState())
+		assert.Equal(t, retryGap, downstream.eventTimer.upstreamOpRetryInterval)
+	}
+
+	expectRetryStep := func(attemptTick *time.Time, expectedGap time.Duration) {
+		nextExpected := expectedGap * 2
+		if nextExpected > maxRetryGap {
+			nextExpected = maxRetryGap
+		}
+
+		// Before and at boundary (strictly Before check), retry must NOT fire
+		downstream.Proc(attemptTick.Add(expectedGap - time.Second))
+		assert.Equal(t, expectedGap, downstream.eventTimer.upstreamOpRetryInterval)
+		assert.Equal(t, 0, downstream.GetConnectionTimerSize())
+
+		downstream.Proc(attemptTick.Add(expectedGap))
+		assert.Equal(t, expectedGap, downstream.eventTimer.upstreamOpRetryInterval)
+		assert.Equal(t, 0, downstream.GetConnectionTimerSize())
+
+		// Past boundary: triggers reconnect attempt, fails synchronously, doubles backoff
+		*attemptTick = attemptTick.Add(expectedGap + time.Second)
+		downstream.Proc(*attemptTick)
+		assert.Equal(t, 0, downstream.GetConnectionTimerSize())
+		assert.Equal(t, types.NodeState_LostUpstream, downstream.GetState())
+		assert.Equal(t, nextExpected, downstream.eventTimer.upstreamOpRetryInterval)
+	}
+
+	// 关闭上游节点，验证退避阶梯翻倍直至封顶 max_retry_interval
+	upstream.Reset()
+	var attemptTick time.Time
+	waitLostUpstream(&attemptTick)
+
+	currentGap := retryGap
+	for round := 0; round < 7; round++ {
+		expectRetryStep(&attemptTick, currentGap)
+		currentGap *= 2
+		if currentGap > maxRetryGap {
+			currentGap = maxRetryGap
+		}
+	}
+
+	// 重启上游节点，下游重连并重新激活后退避间隔必须重置
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12356790, &conf))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(upstreamAddr))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+
+	attemptTick = attemptTick.Add(maxRetryGap + time.Second)
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && downstream.GetState() != types.NodeState_Running {
+		attemptTick = attemptTick.Add(time.Second)
+		upstream.Poll()
+		downstream.Poll()
+		upstream.Proc(attemptTick)
+		downstream.Proc(attemptTick)
+		time.Sleep(15 * time.Millisecond)
+	}
+	require.Equal(t, types.NodeState_Running, downstream.GetState())
+	assert.Equal(t, time.Duration(0), downstream.eventTimer.upstreamOpRetryInterval)
+
+	// 再次关闭上游节点，第一次重试间隔应重置为 retry_interval
+	upstream.Reset()
+	waitLostUpstream(&attemptTick)
+	expectRetryStep(&attemptTick, retryGap)
+	expectRetryStep(&attemptTick, retryGap*2)
+}
+
+// TestNodeRegParity_RegPcSuccessWithSameScope mirrors C++
+// atbus_node_reg::reg_pc_success_with_same_scope.
+func TestNodeRegParity_RegPcSuccessWithSameScope(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrPreferred := reserveTCPListenAddress(t)
+	addrReg := reserveTCPListenAddress(t)
+	addrDownstream := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	upConf.NamespaceName = "game"
+	upConf.NodeLabels = map[string]string{"zone": "a"}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	dsConf := upConf
+	dsConf.UpstreamAddress = addrReg
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	// 上游先监听 addrPreferred 再监听 addrReg；同 scope/namespace 时下游应选中排在前面的 addrPreferred
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrPreferred))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrReg))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Listen(addrDownstream))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstream.GetId())
+	}, upstream, downstream)
+
+	// 对端的 scope/namespace/labels 必须随注册包传递
+	epDownstream := upstream.GetEndpoint(downstream.GetId())
+	require.NotNil(t, epDownstream)
+	assert.Equal(t, "prod", epDownstream.GetScope())
+	assert.Equal(t, "game", epDownstream.GetNamespace())
+	assert.Equal(t, "a", epDownstream.GetLabels()["zone"])
+
+	epUpstream := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epUpstream)
+	assert.Equal(t, "prod", epUpstream.GetScope())
+	assert.Equal(t, "game", epUpstream.GetNamespace())
+	assert.Equal(t, "a", epUpstream.GetLabels()["zone"])
+
+	dataConn := downstream.self.GetDataConnection(epUpstream, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, addrPreferred, dataConn.GetAddress().GetAddress())
+}
+
+// TestNodeRegParity_RegPcScopeMismatchWithoutRedial mirrors C++
+// atbus_node_reg::reg_pc_scope_mismatch_without_redial.
+func TestNodeRegParity_RegPcScopeMismatchWithoutRedial(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrOther := reserveTCPListenAddress(t)
+	addrReg := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	dsConf := conf
+	dsConf.Scope = "dev"
+	dsConf.UpstreamAddress = addrReg
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	// 上游先监听 addrOther 再监听 addrReg；scope 不匹配时上游通告的 listen 地址必须全部跳过，仅使用已知可达的 addrReg
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrOther))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrReg))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstream.GetId())
+	}, upstream, downstream)
+
+	epUpstream := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epUpstream)
+	dataConn := downstream.self.GetDataConnection(epUpstream, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, addrReg, dataConn.GetAddress().GetAddress())
+}
+
+// TestNodeRegParity_RegPcNamespaceMismatchWithoutRedial mirrors C++
+// atbus_node_reg::reg_pc_namespace_mismatch_without_redial.
+func TestNodeRegParity_RegPcNamespaceMismatchWithoutRedial(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrOther := reserveTCPListenAddress(t)
+	addrReg := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	upConf.NamespaceName = "game"
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	dsConf := conf
+	dsConf.Scope = "prod"
+	dsConf.NamespaceName = "lobby"
+	dsConf.UpstreamAddress = addrReg
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrOther))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrReg))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstream.GetId())
+	}, upstream, downstream)
+
+	epUpstream := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epUpstream)
+	dataConn := downstream.self.GetDataConnection(epUpstream, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, addrReg, dataConn.GetAddress().GetAddress())
+}
+
+// TestNodeRegParity_RegPcGatewaySelectMatchingScope mirrors C++
+// atbus_node_reg::reg_pc_gateway_select_matching_scope.
+func TestNodeRegParity_RegPcGatewaySelectMatchingScope(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrOther := reserveTCPListenAddress(t)
+	addrDev := reserveTCPListenAddress(t)
+	addrDownstream := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	upConf.Gateway = []types.Gateway{
+		{Address: addrOther, MatchScope: "other"},
+		{Address: addrDev, MatchScope: "dev"},
+	}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	dsConf := conf
+	dsConf.Scope = "dev"
+	dsConf.NodeLabels = map[string]string{"zone": "a"}
+	dsConf.UpstreamAddress = addrOther
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrOther))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrDev))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Listen(addrDownstream))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstream.GetId())
+	}, upstream, downstream)
+
+	// 下游必须选中匹配自身 scope 的 gateway 地址
+	epUpstream := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epUpstream)
+	dataConn := downstream.self.GetDataConnection(epUpstream, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, addrDev, dataConn.GetAddress().GetAddress())
+
+	// 下游 endpoint 必须保存上游通告的 gateway 匹配规则
+	gateways := epUpstream.GetGateway()
+	require.Len(t, gateways, 2)
+	assert.Equal(t, addrOther, gateways[0].Address)
+	assert.Equal(t, "other", gateways[0].MatchScope)
+	assert.Equal(t, addrDev, gateways[1].Address)
+	assert.Equal(t, "dev", gateways[1].MatchScope)
+
+	// 上游 endpoint 必须拿到下游上报的身份信息
+	epDownstream := upstream.GetEndpoint(downstream.GetId())
+	require.NotNil(t, epDownstream)
+	assert.Equal(t, "dev", epDownstream.GetScope())
+	assert.Equal(t, "a", epDownstream.GetLabels()["zone"])
+}
+
+// TestNodeRegParity_RegPcGatewayWildcardReachable mirrors C++
+// atbus_node_reg::reg_pc_gateway_wildcard_reachable.
+func TestNodeRegParity_RegPcGatewayWildcardReachable(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrOther := reserveTCPListenAddress(t)
+	addrWildcard := reserveTCPListenAddress(t)
+	addrDownstream := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstream := NewNode()
+	t.Cleanup(func() {
+		downstream.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	upConf.Gateway = []types.Gateway{
+		{Address: addrOther, MatchScope: "other"},
+		{Address: addrWildcard},
+	}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	dsConf := conf
+	dsConf.Scope = "dev"
+	dsConf.UpstreamAddress = addrOther
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Init(0x12346789, &dsConf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrOther))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrWildcard))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Listen(addrDownstream))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstream.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstream.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstream.GetId())
+	}, upstream, downstream)
+
+	epUpstream := downstream.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epUpstream)
+	dataConn := downstream.self.GetDataConnection(epUpstream, false)
+	require.NotNil(t, dataConn)
+	assert.Equal(t, addrWildcard, dataConn.GetAddress().GetAddress())
+}
+
+// TestNodeRegParity_RegPcGatewayLabelSubset mirrors C++
+// atbus_node_reg::reg_pc_gateway_label_subset.
+func TestNodeRegParity_RegPcGatewayLabelSubset(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	addrLabeled := reserveTCPListenAddress(t)
+	addrWildcard := reserveTCPListenAddress(t)
+	addrFull := reserveTCPListenAddress(t)
+	addrPartial := reserveTCPListenAddress(t)
+
+	upstream := NewNode()
+	downstreamFull := NewNode()
+	downstreamPartial := NewNode()
+	t.Cleanup(func() {
+		downstreamPartial.Reset()
+		downstreamFull.Reset()
+		upstream.Reset()
+	})
+
+	upConf := conf
+	upConf.Scope = "prod"
+	upConf.Gateway = []types.Gateway{
+		{
+			Address:     addrLabeled,
+			MatchLabels: map[string]string{"zone": "a", "app": "x"},
+		},
+		{Address: addrWildcard},
+	}
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Init(0x12345678, &upConf))
+
+	// labels 覆盖 match_labels 全部键值的对端可以使用受限地址
+	fullConf := conf
+	fullConf.Scope = "dev"
+	fullConf.NodeLabels = map[string]string{"zone": "a", "app": "x", "extra": "1"}
+	fullConf.UpstreamAddress = addrWildcard
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamFull.Init(0x12346789, &fullConf))
+
+	// labels 只覆盖部分键值的对端必须跳过受限地址
+	partialConf := conf
+	partialConf.Scope = "dev"
+	partialConf.NodeLabels = map[string]string{"zone": "a"}
+	partialConf.UpstreamAddress = addrLabeled
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamPartial.Init(0x12349012, &partialConf))
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrLabeled))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Listen(addrWildcard))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamFull.Listen(addrFull))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamPartial.Listen(addrPartial))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, upstream.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamFull.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, downstreamPartial.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		return downstreamFull.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstreamFull.GetId()) &&
+			downstreamPartial.IsEndpointAvailable(upstream.GetId()) &&
+			upstream.IsEndpointAvailable(downstreamPartial.GetId())
+	}, upstream, downstreamFull, downstreamPartial)
+
+	// 全量 labels 的对端选中受限地址(列表顺序优先), 而不是回退到注册地址
+	epFull := downstreamFull.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epFull)
+	connFull := downstreamFull.self.GetDataConnection(epFull, false)
+	require.NotNil(t, connFull)
+	assert.Equal(t, addrLabeled, connFull.GetAddress().GetAddress())
+
+	// 部分 labels 的对端只能选中通配地址, 而不是受限的注册地址
+	epPartial := downstreamPartial.GetEndpoint(upstream.GetId())
+	require.NotNil(t, epPartial)
+	connPartial := downstreamPartial.self.GetDataConnection(epPartial, false)
+	require.NotNil(t, connPartial)
+	assert.Equal(t, addrWildcard, connPartial.GetAddress().GetAddress())
 }

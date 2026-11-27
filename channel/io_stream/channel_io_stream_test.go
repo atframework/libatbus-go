@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	channel_utility "github.com/atframework/libatbus-go/channel/utility"
 	error_code "github.com/atframework/libatbus-go/error_code"
 	types "github.com/atframework/libatbus-go/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // maxTestBufferLen matches C++ MAX_TEST_BUFFER_LEN = ATBUS_MACRO_MESSAGE_LIMIT * 4
@@ -1019,13 +1021,27 @@ func TestIoStreamUnixConnectFailed(t *testing.T) {
 // Pipe Basic Test (Windows named pipe / Unix pipe alias)
 // ============================================================================
 
+func TestIoStreamResolvePipeAddress(t *testing.T) {
+	var channel IoStreamChannel
+	for _, scheme := range []string{"pipe", "unix"} {
+		for _, host := range []string{"atbus.sock", "\\\\.\\pipe\\atbus"} {
+			addr := channel_utility.MakeAddressFromComponents(scheme, host, 0)
+			network, address := channel.resolveAddress(addr)
+			assert.Equal(t, "pipe", network, addr.GetAddress())
+			assert.Equal(t, host, address, addr.GetAddress())
+		}
+	}
+}
+
 // TestIoStreamPipeBasic verifies basic pipe listen, connect, and data send/receive.
 func TestIoStreamPipeBasic(t *testing.T) {
-	// "pipe://" is the canonical scheme name. It uses Unix domain sockets on Unix
-	// and AF_UNIX sockets on Windows (Windows 10 1803+).
-	// "unix://" is kept for backward compatibility.
-	sockPath := getUnixSocketPath(t)
-	defer os.Remove(sockPath)
+	var sockPath string
+	if runtime.GOOS == "windows" {
+		sockPath = fmt.Sprintf(`\\.\pipe\atbus-test-%d`, time.Now().UnixNano())
+	} else {
+		sockPath = getUnixSocketPath(t)
+		defer os.Remove(sockPath)
+	}
 	listenAddr := "pipe://" + sockPath
 
 	ctx := context.Background()
@@ -1051,11 +1067,11 @@ func TestIoStreamPipeBasic(t *testing.T) {
 
 	// Listen
 	errCode := svr.Listen(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "pipe listen should succeed")
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "pipe listen should succeed")
 
 	// Connect
 	conn1, errCode := cli.Connect(listenAddr)
-	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "pipe connect should succeed")
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode, "pipe connect should succeed")
 	assert.NotNil(t, conn1)
 
 	// Wait for connection
@@ -1157,9 +1173,30 @@ func TestIoStreamDnsConnect(t *testing.T) {
 // IPv6 Test - matches C++ ipv6://::1 connect
 // ============================================================================
 
+// probeIPv6Loopback mirrors C++ unit_test_probe_ipv6_loopback(): verifies that both
+// binding and dialing IPv6 loopback [::1] actually work on the current host.
+func probeIPv6Loopback() bool {
+	l, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	defer l.Close()
+
+	conn, err := net.DialTimeout("tcp6", l.Addr().String(), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // TestIoStreamIpv6Connect verifies IPv6 connections work.
 func TestIoStreamIpv6Connect(t *testing.T) {
-	// Check if IPv6 is available
+	// Check if IPv6 loopback connect is available (not just bind)
+	if !probeIPv6Loopback() {
+		t.Skip("IPv6 loopback connect not available on this system")
+	}
+
 	l, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		t.Skip("IPv6 not available on this system")
@@ -2424,4 +2461,231 @@ func TestReadLoopManySmallFramesBoundaryStress(t *testing.T) {
 
 	serverEnd.Close()
 	channel.Close()
+}
+
+// TestIoStreamDisconnectCreatedConnection verifies that disconnecting a connection
+// still in IoStreamConnectionStatusCreated succeeds and removes it from the pool
+// (mirrors C++ commit 9577f560 allowing disconnect on kCreated connections).
+func TestIoStreamDisconnectCreatedConnection(t *testing.T) {
+	ctx := context.Background()
+	channel := NewIoStreamChannel(ctx, nil)
+	defer channel.Close()
+
+	var disconnected atomic.Int32
+	channel.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeDisconnected,
+		func(ch types.IoStreamChannel, c types.IoStreamConnection, status int32, privData interface{}) {
+			disconnected.Add(1)
+		})
+
+	serverEnd, clientEnd := net.Pipe()
+	defer clientEnd.Close()
+
+	conn := channel.createConnection(serverEnd, nil, IoStreamConnectionFlagAccept)
+	conn.SetStatus(IoStreamConnectionStatusCreated)
+	go channel.writeLoop(conn)
+
+	errCode := channel.Disconnect(conn)
+	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
+	// Repeated disconnect is idempotent
+	errCode = channel.Disconnect(conn)
+	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, errCode)
+
+	ok := waitForCondition(t, 5*time.Second, func() bool {
+		return conn.GetStatus() == IoStreamConnectionStatusDisconnected && disconnected.Load() == 1
+	})
+	assert.True(t, ok, "created connection should transition to disconnected")
+	assert.Equal(t, IoStreamConnectionStatusDisconnected, conn.GetStatus())
+	assert.Equal(t, int32(1), disconnected.Load())
+	channel.mu.RLock()
+	connCount := len(channel.connections)
+	channel.mu.RUnlock()
+	assert.Equal(t, 0, connCount)
+}
+
+func TestIoStreamSendConcurrentDisconnect(t *testing.T) {
+	channel := NewIoStreamChannel(context.Background(), nil)
+	defer channel.Close()
+	for range 100 {
+		server, client := net.Pipe()
+		conn := channel.createConnection(server, nil, IoStreamConnectionFlagAccept)
+		ready := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			<-ready
+			for range 100 {
+				channel.Send(conn, []byte("payload"))
+			}
+		}()
+		close(ready)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, channel.disconnectInternal(conn, true))
+		<-done
+		client.Close()
+		require.Equal(t, error_code.EN_ATBUS_ERR_CLOSING, channel.Send(conn, []byte("payload")))
+	}
+}
+
+// TestIoStreamSendConcurrentForceDisconnectWakesWriteLoop verifies that multiple concurrent
+// Send goroutines racing against forced teardown neither panic nor leak writeLoop.
+func TestIoStreamSendConcurrentForceDisconnectWakesWriteLoop(t *testing.T) {
+	channel := NewIoStreamChannel(context.Background(), nil)
+	defer channel.Close()
+
+	for range 50 {
+		server, client := net.Pipe()
+		conn := channel.createConnection(server, nil, IoStreamConnectionFlagAccept)
+
+		writeDone := make(chan struct{})
+		go func() {
+			defer close(writeDone)
+			channel.writeLoop(conn)
+		}()
+
+		// Drain peer side so writes can make progress before teardown.
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			buf := make([]byte, 4096)
+			for {
+				if _, err := client.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+
+		ready := make(chan struct{})
+		var senders sync.WaitGroup
+		for range 4 {
+			senders.Add(1)
+			go func() {
+				defer senders.Done()
+				<-ready
+				for range 64 {
+					ret := channel.Send(conn, []byte("concurrent-payload"))
+					assert.True(t,
+						ret == error_code.EN_ATBUS_ERR_SUCCESS ||
+							ret == error_code.EN_ATBUS_ERR_CLOSING ||
+							ret == error_code.EN_ATBUS_ERR_BUFF_LIMIT,
+						"unexpected Send result: %v", ret)
+				}
+			}()
+		}
+
+		close(ready)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, channel.disconnectInternal(conn, true))
+		senders.Wait()
+
+		select {
+		case <-writeDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("writeLoop did not exit after forced disconnect")
+		}
+
+		client.Close()
+		<-readDone
+		assert.Equal(t, IoStreamConnectionStatusDisconnected, conn.GetStatus())
+		assert.True(t, conn.GetFlag(IoStreamConnectionFlagClosing))
+		assert.Equal(t, error_code.EN_ATBUS_ERR_CLOSING, channel.Send(conn, []byte("after-close")))
+	}
+}
+
+// TestIoStreamSendConcurrentGracefulDisconnect verifies concurrent Send + Disconnect
+// with an active writeLoop completes cleanly without panic or deadlock.
+func TestIoStreamSendConcurrentGracefulDisconnect(t *testing.T) {
+	channel := NewIoStreamChannel(context.Background(), nil)
+	defer channel.Close()
+
+	for range 50 {
+		server, client := net.Pipe()
+		conn := channel.createConnection(server, nil, IoStreamConnectionFlagAccept)
+
+		writeDone := make(chan struct{})
+		go func() {
+			defer close(writeDone)
+			channel.writeLoop(conn)
+		}()
+
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			buf := make([]byte, 4096)
+			for {
+				if _, err := client.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+
+		ready := make(chan struct{})
+		var senders sync.WaitGroup
+		for range 4 {
+			senders.Add(1)
+			go func() {
+				defer senders.Done()
+				<-ready
+				for range 64 {
+					ret := channel.Send(conn, []byte("graceful-payload"))
+					assert.True(t,
+						ret == error_code.EN_ATBUS_ERR_SUCCESS ||
+							ret == error_code.EN_ATBUS_ERR_CLOSING ||
+							ret == error_code.EN_ATBUS_ERR_BUFF_LIMIT,
+						"unexpected Send result: %v", ret)
+				}
+			}()
+		}
+
+		close(ready)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, channel.Disconnect(conn))
+		senders.Wait()
+
+		select {
+		case <-writeDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("writeLoop did not exit after graceful disconnect")
+		}
+
+		client.Close()
+		<-readDone
+		assert.Equal(t, IoStreamConnectionStatusDisconnected, conn.GetStatus())
+		assert.Equal(t, error_code.EN_ATBUS_ERR_CLOSING, channel.Send(conn, []byte("after-disconnect")))
+	}
+}
+
+// TestIoStreamReadEgainCountResetOnSuccess verifies that readEgainCount resets to 0
+// when bytes are successfully read (mirrors C++ commit af0f581b).
+func TestIoStreamReadEgainCountResetOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	conf := &IoStreamConfigure{}
+	SetDefaultIoStreamConfigure(conf)
+	conf.MaxReadNetEgainCount = 10
+	channel := NewIoStreamChannel(ctx, conf)
+	defer channel.Close()
+
+	var recvCount atomic.Int32
+	channel.GetEventHandleSet().SetCallback(IoStreamCallbackEventTypeReceived,
+		func(ch types.IoStreamChannel, c types.IoStreamConnection, status int32, privData interface{}) {
+			recvCount.Add(1)
+		})
+
+	serverEnd, clientEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+
+	conn := channel.createConnection(serverEnd, nil, IoStreamConnectionFlagAccept)
+	atomic.StoreUint64(&conn.readEgainCount, 5)
+
+	go channel.readLoop(conn)
+	go channel.writeLoop(conn)
+
+	payload := []byte("reset-egain-counter")
+	frame := make([]byte, PackFrameSize(uint64(len(payload))))
+	PackFrame(payload, frame)
+	_, err := clientEnd.Write(frame)
+	assert.NoError(t, err)
+
+	ok := waitForCondition(t, 5*time.Second, func() bool {
+		return recvCount.Load() >= 1
+	})
+	assert.True(t, ok, "should receive frame")
+	assert.Equal(t, uint64(0), atomic.LoadUint64(&conn.readEgainCount), "readEgainCount should reset to 0 on successful read")
 }

@@ -72,7 +72,6 @@ replace github.com/atframework/libatbus-go => ./atframework/libatbus-go
 | Dependency                                | Purpose                                     |
 | ----------------------------------------- | ------------------------------------------- |
 | `github.com/atframework/atframe-utils-go` | Utility library (LRU map, algorithms)       |
-| `github.com/spaolacci/murmur3`            | Murmur3 hash for buffer management          |
 | `github.com/stretchr/testify`             | Test assertions                             |
 | `golang.org/x/crypto`                     | ChaCha20, XXTEA, extended crypto algorithms |
 | `google.golang.org/protobuf`              | Protobuf runtime                            |

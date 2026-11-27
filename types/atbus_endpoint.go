@@ -1,6 +1,10 @@
 package libatbus_types
 
-import "time"
+import (
+	"time"
+
+	protocol "github.com/atframework/libatbus-go/protocol"
+)
 
 type (
 	EndpointFlag uint32
@@ -22,6 +26,10 @@ type Endpoint interface {
 
 	Reset()
 
+	Reload(scope string, namespaceName string, labels map[string]string, gateways []Gateway)
+
+	ReloadFromProtocol(scope string, namespaceName string, labels map[string]string, channels []*protocol.ChannelData)
+
 	GetId() BusIdType
 
 	GetPid() int32
@@ -31,6 +39,12 @@ type Endpoint interface {
 	GetHashCode() string
 
 	UpdateHashCode(code string)
+
+	GetScope() string
+
+	GetNamespace() string
+
+	GetLabels() map[string]string
 
 	AddConnection(conn Connection, forceData bool) bool
 
@@ -43,6 +57,8 @@ type Endpoint interface {
 	GetFlag(f EndpointFlag) bool
 
 	SetFlag(f EndpointFlag, v bool)
+
+	GetGateway() []Gateway
 
 	GetListenAddress() []ChannelAddress
 

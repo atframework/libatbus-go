@@ -5,10 +5,10 @@ package libatbus_channel_iostream
 import (
 	"encoding/binary"
 	"errors"
+	"math/bits"
 
 	buffer "github.com/atframework/libatbus-go/buffer"
 	error_code "github.com/atframework/libatbus-go/error_code"
-	"github.com/spaolacci/murmur3"
 )
 
 // Frame format:
@@ -43,7 +43,24 @@ var (
 // CalculateHash calculates the murmur3_x86_32 hash of the payload with seed 0.
 // This matches the C++ implementation: atfw::util::hash::murmur_hash3_x86_32(buf, len, 0)
 func CalculateHash(payload []byte) uint32 {
-	return murmur3.Sum32(payload)
+	const c1, c2 uint32 = 0xcc9e2d51, 0x1b873593
+	length := uint32(len(payload))
+	var h uint32
+	for len(payload) >= 4 {
+		k := binary.LittleEndian.Uint32(payload)
+		h ^= bits.RotateLeft32(k*c1, 15) * c2
+		h = bits.RotateLeft32(h, 13)*5 + 0xe6546b64
+		payload = payload[4:]
+	}
+	var tail uint32
+	for i, b := range payload {
+		tail |= uint32(b) << (8 * i)
+	}
+	h ^= bits.RotateLeft32(tail*c1, 15) * c2
+	h ^= length
+	h = (h ^ (h >> 16)) * 0x85ebca6b
+	h = (h ^ (h >> 13)) * 0xc2b2ae35
+	return h ^ (h >> 16)
 }
 
 // PackFrameSize returns the total size needed to pack a frame with the given payload size.

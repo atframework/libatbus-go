@@ -130,7 +130,7 @@ func TestAddConnectionFault_BelowThreshold_DoesNotReset(t *testing.T) {
 	ret := n.Init(0x12345678, &conf)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connected)
 
@@ -153,7 +153,7 @@ func TestAddConnectionFault_AtThreshold_ResetsConnection(t *testing.T) {
 	ep := CreateEndpoint(&n, 0x12345679, int64(n.GetPid()), n.GetHostname())
 	require.NotNil(t, ep)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connected)
 	ep.AddConnection(conn, false)
@@ -175,6 +175,19 @@ func TestAddConnectionFault_NilConnection_ReturnsFalse(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
 	assert.False(t, n.addConnectionFault(nil))
+}
+
+func TestAddConnectionFaultBeforeRegistration(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	conn := CreateConnection(n, "ipv4://127.0.0.1:1", false)
+	conn.setStatus(types.ConnectionState_Handshaking)
+	require.Nil(t, conn.GetBinding())
+	require.False(t, n.addConnectionFault(conn))
+	require.True(t, n.addConnectionFault(conn))
+	assert.Equal(t, types.ConnectionState_Disconnected, conn.GetStatus())
+	assert.Zero(t, n.GetConnectionTimerSize())
 }
 
 // ============================================================================
@@ -206,7 +219,7 @@ func TestConnectionClearStatisticFault_ResetsCounter(t *testing.T) {
 	ret := n.Init(0x12345678, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	conn.AddStatisticFault()
@@ -240,7 +253,7 @@ func TestConnectionAddStatisticFault_Monotonic(t *testing.T) {
 	ret := n.Init(0x12345678, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	for i := uint64(1); i <= 10; i++ {
@@ -283,13 +296,13 @@ func TestOnInvalidConnection_FiresOnConnectingTimeout(t *testing.T) {
 	})
 
 	// Create a connection that is NOT connected (simulates connecting state)
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:9999")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:9999", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connecting)
 
 	// Add to connecting list with a timeout in the past
 	pastTimeout := time.Now().Add(-1 * time.Second)
-	n.eventTimer.connectingList.Put(conn.GetAddress().GetAddress(),
+	n.eventTimer.connectingListByPtr.Put(conn,
 		types.TimerDescPair[*Connection]{
 			Timeout: pastTimeout,
 			Value:   conn,
@@ -321,12 +334,12 @@ func TestOnInvalidConnection_NotFiredWhenConnectionAlreadyConnected(t *testing.T
 	})
 
 	// Connection that IS already connected — should be skipped, not timed out
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:9998")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:9998", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connected)
 
 	pastTimeout := time.Now().Add(-1 * time.Second)
-	n.eventTimer.connectingList.Put(conn.GetAddress().GetAddress(),
+	n.eventTimer.connectingListByPtr.Put(conn,
 		types.TimerDescPair[*Connection]{
 			Timeout: pastTimeout,
 			Value:   conn,
@@ -347,12 +360,12 @@ func TestOnInvalidConnection_NotFiredWhenNoCallback(t *testing.T) {
 	ret = n.Start()
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:9997")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:9997", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connecting)
 
 	pastTimeout := time.Now().Add(-1 * time.Second)
-	n.eventTimer.connectingList.Put(conn.GetAddress().GetAddress(),
+	n.eventTimer.connectingListByPtr.Put(conn,
 		types.TimerDescPair[*Connection]{
 			Timeout: pastTimeout,
 			Value:   conn,
@@ -378,13 +391,13 @@ func TestOnInvalidConnection_NotFiredWhenTimeoutNotReached(t *testing.T) {
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	})
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:9996")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:9996", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connecting)
 
 	// Timeout in the future
 	futureTimeout := time.Now().Add(10 * time.Second)
-	n.eventTimer.connectingList.Put(conn.GetAddress().GetAddress(),
+	n.eventTimer.connectingListByPtr.Put(conn,
 		types.TimerDescPair[*Connection]{
 			Timeout: futureTimeout,
 			Value:   conn,

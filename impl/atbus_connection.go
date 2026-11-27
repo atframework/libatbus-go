@@ -1,6 +1,9 @@
 package libatbus_impl
 
 import (
+	"fmt"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	io_stream "github.com/atframework/libatbus-go/channel/io_stream"
@@ -16,6 +19,8 @@ type Connection struct {
 	binding           types.Endpoint
 	status            types.ConnectionState
 	address           types.ChannelAddress
+	originAddress     string
+	autoAddressMode   bool
 	flags             uint32
 	connectionContext *ConnectionContext
 	statistic         types.ConnectionStatistic
@@ -24,12 +29,65 @@ type Connection struct {
 	ioStreamConnection *io_stream.IoStreamConnection
 }
 
-func CreateConnection(owner *Node, addr string) *Connection {
-	if owner == nil {
+func normalizeAddressForListenChannel(address *channel_utility.ChannelAddress) {
+	if address == nil {
+		return
+	}
+
+	scheme := strings.ToLower(address.Scheme)
+	if (scheme == "unix" || scheme == "pipe") && !io_stream.IsNativePipePath(address.Host) {
+		if !filepath.IsAbs(address.Host) {
+			absPath, err := filepath.Abs(address.Host)
+			maxAddrSize := io_stream.GetMaxUnixSocketLength()
+			if err == nil && maxAddrSize > 0 && len(absPath) <= maxAddrSize {
+				*address = *channel_utility.MakeAddressFromComponents(address.Scheme, absPath, 0)
+			}
+		}
+	}
+}
+
+func normalizeAddressForConnectChannel(address *channel_utility.ChannelAddress) *channel_utility.ChannelAddress {
+	if address == nil {
 		return nil
 	}
 
+	scheme := strings.ToLower(address.Scheme)
+	if scheme == "atcp" || scheme == "ipv6" || scheme == "ipv4" {
+		if address.Host == "0.0.0.0" {
+			return channel_utility.MakeAddressFromComponents("atcp", "127.0.0.1", address.Port)
+		}
+		if address.Host == "::" {
+			return channel_utility.MakeAddressFromComponents("atcp", "::1", address.Port)
+		}
+	}
+
+	return address
+}
+
+func makeConnectionAddress(addr string, listenMode ...bool) (*channel_utility.ChannelAddress, bool) {
 	address, ok := channel_utility.MakeAddress(addr)
+	if !ok || address == nil {
+		return nil, false
+	}
+
+	if len(listenMode) == 0 {
+		return address, true
+	}
+	if listenMode[0] {
+		normalizeAddressForListenChannel(address)
+	} else {
+		address = normalizeAddressForConnectChannel(address)
+	}
+
+	return address, address != nil
+}
+
+func CreateConnection(owner *Node, addr string, listenMode ...bool) *Connection {
+	if owner == nil || addr == "" {
+		return nil
+	}
+
+	address, ok := makeConnectionAddress(addr, listenMode...)
 	if !ok || address == nil {
 		return nil
 	}
@@ -39,12 +97,17 @@ func CreateConnection(owner *Node, addr string) *Connection {
 		binding:           nil,
 		status:            types.ConnectionState_Disconnected,
 		address:           address,
+		originAddress:     addr,
+		autoAddressMode:   len(listenMode) == 0,
 		flags:             0,
 		connectionContext: NewConnectionContext(owner.GetCryptoKeyExchangeType()),
 		statistic:         types.ConnectionStatistic{},
 	}
 
-	c.connectionContext.SetSupportedKeyExchange(owner.GetCryptoKeyExchangeType())
+	if !owner.addConnectionTimer(c) {
+		return nil
+	}
+
 	return c
 }
 
@@ -53,10 +116,35 @@ func (c *Connection) setFlag(f types.ConnectionFlag, v bool) {
 		return
 	}
 
-	if v {
-		c.flags |= uint32(f)
-	} else {
-		c.flags &^= uint32(f)
+	mask := uint32(f)
+	for {
+		old := atomic.LoadUint32(&c.flags)
+		var next uint32
+		if v {
+			next = old | mask
+		} else {
+			next = old &^ mask
+		}
+		if atomic.CompareAndSwapUint32(&c.flags, old, next) {
+			return
+		}
+	}
+}
+
+func (c *Connection) trySetFlag(f types.ConnectionFlag) bool {
+	if c == nil {
+		return false
+	}
+
+	mask := uint32(f)
+	for {
+		old := atomic.LoadUint32(&c.flags)
+		if old&mask != 0 {
+			return false
+		}
+		if atomic.CompareAndSwapUint32(&c.flags, old, old|mask) {
+			return true
+		}
 	}
 }
 
@@ -65,15 +153,16 @@ func (c *Connection) Reset() {
 		return
 	}
 
-	if c.CheckFlag(types.ConnectionFlag_Resetting) {
+	if !c.trySetFlag(types.ConnectionFlag_Resetting) {
 		return
 	}
-	c.setFlag(types.ConnectionFlag_Resetting, true)
 
 	bindEp := c.binding
 
 	// 后面会重置状态，影响事件判定，所以要先移除检查队列
-	c.owner.removeConnectionTimer(c)
+	c.owner.removeConnectionTimer(c, false)
+
+	c.Disconnect()
 
 	if c.binding != nil {
 		c.binding.RemoveConnection(c)
@@ -81,7 +170,7 @@ func (c *Connection) Reset() {
 
 	c.owner.AddConnectionGcList(c)
 
-	c.flags = 0
+	atomic.StoreUint32(&c.flags, 0)
 	c.statistic = types.ConnectionStatistic{}
 
 	c.owner.LogDebug(bindEp, c, nil, "connection disconnected")
@@ -91,6 +180,28 @@ func (c *Connection) Reset() {
 func (c *Connection) Proc() types.ErrorType {
 	// For iostream mode, proc is driven by goroutines, nothing to do here
 	return error_code.EN_ATBUS_ERR_SUCCESS
+}
+
+func (c *Connection) resolveAddressMode(listen bool) {
+	if !c.autoAddressMode {
+		return
+	}
+	// The factory already parsed originAddress and registered its timeout.
+	address, _ := makeConnectionAddress(c.originAddress, listen)
+	old := c.address.GetAddress()
+	c.address = address
+	if old == address.Address {
+		return
+	}
+	timer := &c.owner.eventTimer
+	timer.connectingListMu.Lock()
+	defer timer.connectingListMu.Unlock()
+	if timer.connectingListByChannel[old] == c {
+		delete(timer.connectingListByChannel, old)
+	}
+	if _, pending := timer.connectingListByPtr.Get(c, false); pending {
+		timer.connectingListByChannel[address.Address] = c
+	}
 }
 
 func (c *Connection) Listen() types.ErrorType {
@@ -108,27 +219,40 @@ func (c *Connection) Listen() types.ErrorType {
 		return error_code.EN_ATBUS_ERR_CHANNEL_NOT_SUPPORT
 	}
 
+	c.resolveAddressMode(true)
+	scheme := strings.ToLower(c.address.GetScheme())
+	if scheme == "unix" || scheme == "pipe" {
+		c.setFlag(types.ConnectionFlag_AccessShareHost, true)
+	}
+
 	// Set status to connecting first
-	c.status = types.ConnectionState_Connecting
+	c.setStatus(types.ConnectionState_Connecting)
 	c.setFlag(types.ConnectionFlag_ListenFd, true)
 	c.setFlag(types.ConnectionFlag_ServerMode, true)
 
 	// Start listening
 	ret := channel.Listen(c.address.GetAddress())
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		c.status = types.ConnectionState_Disconnected
+		c.owner.LogError(c.GetBinding(), c, 0, ret,
+			fmt.Sprintf("listen %s failed", c.address.GetAddress()))
+		c.setStatus(types.ConnectionState_Disconnected)
 		c.setFlag(types.ConnectionFlag_ListenFd, false)
 		c.setFlag(types.ConnectionFlag_ServerMode, false)
+		c.owner.removeConnectionTimer(c, false)
 		return ret
 	}
 
-	// Mark as connected (listening)
-	c.status = types.ConnectionState_Connected
+	// Mark as connected (listening) — also removes the connection timer
+	c.setStatus(types.ConnectionState_Connected)
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func (c *Connection) Connect() types.ErrorType {
+	return c.connect(nil)
+}
+
+func (c *Connection) connect(endpoint types.Endpoint) types.ErrorType {
 	if c == nil || c.owner == nil {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
@@ -143,24 +267,23 @@ func (c *Connection) Connect() types.ErrorType {
 		return error_code.EN_ATBUS_ERR_CHANNEL_NOT_SUPPORT
 	}
 
+	c.resolveAddressMode(false)
+	scheme := strings.ToLower(c.address.GetScheme())
+	if scheme == "unix" || scheme == "pipe" {
+		c.setFlag(types.ConnectionFlag_AccessShareHost, true)
+	}
+
 	// Set status to connecting
-	c.status = types.ConnectionState_Connecting
+	c.setStatus(types.ConnectionState_Connecting)
 	c.setFlag(types.ConnectionFlag_RegFd, true)
 	c.setFlag(types.ConnectionFlag_ClientMode, true)
 
-	// Add to connecting list with timeout
-	c.owner.eventTimer.connectingList.Put(c.address.GetAddress(),
-		types.TimerDescPair[*Connection]{
-			Timeout: c.owner.eventTimer.tick.Add(c.owner.configure.FirstIdleTimeout),
-			Value:   c,
-		})
-
-	// Connect asynchronously
+	// Connect
 	ioConn, ret := channel.Connect(c.address.GetAddress())
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		c.status = types.ConnectionState_Disconnected
-		c.setFlag(types.ConnectionFlag_ClientMode, false)
-		c.owner.eventTimer.connectingList.Delete(c.address.GetAddress())
+		c.owner.LogError(c.GetBinding(), c, 0, ret,
+			fmt.Sprintf("channel connect to %s failed", c.address.GetAddress()))
+		c.Reset()
 		return ret
 	}
 
@@ -169,7 +292,13 @@ func (c *Connection) Connect() types.ErrorType {
 		c.ioStreamConnection = concreteConn
 	}
 	ioConn.SetPrivateData(c)
-	c.status = types.ConnectionState_Handshaking
+	// Attach an explicitly selected endpoint while the connection is still
+	// connecting. AddConnection promotes a handshaking connection to connected.
+	if endpoint != nil && !endpoint.AddConnection(c, false) {
+		c.Reset()
+		return error_code.EN_ATBUS_ERR_BAD_DATA
+	}
+	c.setStatus(types.ConnectionState_Handshaking)
 
 	ret = c.owner.OnNewConnection(c)
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
@@ -185,22 +314,24 @@ func (c *Connection) Disconnect() types.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	if c.status == types.ConnectionState_Disconnected {
+	if c.GetStatus() == types.ConnectionState_Disconnected {
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	c.status = types.ConnectionState_Disconnecting
+	c.setStatus(types.ConnectionState_Disconnecting)
 
 	// Disconnect the underlying IO stream connection
 	if c.ioStreamConnection != nil {
+		ioConn := c.ioStreamConnection
+		c.ioStreamConnection = nil
+		ioConn.SetPrivateData(nil)
 		channel := c.getIoStreamChannel()
 		if channel != nil {
-			channel.Disconnect(c.ioStreamConnection)
+			channel.Disconnect(ioConn)
 		}
-		c.ioStreamConnection = nil
 	}
 
-	c.status = types.ConnectionState_Disconnected
+	c.setStatus(types.ConnectionState_Disconnected)
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -300,12 +431,20 @@ func (c *Connection) GetAddress() types.ChannelAddress {
 	return c.address
 }
 
+func (c *Connection) GetOriginAddress() string {
+	if c == nil {
+		return ""
+	}
+
+	return c.originAddress
+}
+
 func (c *Connection) IsConnected() bool {
 	if c == nil {
 		return false
 	}
 
-	return c.status == types.ConnectionState_Connected
+	return c.GetStatus() == types.ConnectionState_Connected
 }
 
 func (c *Connection) IsRunning() bool {
@@ -313,9 +452,10 @@ func (c *Connection) IsRunning() bool {
 		return false
 	}
 
-	return c.status == types.ConnectionState_Connecting ||
-		c.status == types.ConnectionState_Handshaking ||
-		c.status == types.ConnectionState_Connected
+	status := c.GetStatus()
+	return status == types.ConnectionState_Connecting ||
+		status == types.ConnectionState_Handshaking ||
+		status == types.ConnectionState_Connected
 }
 
 func (c *Connection) GetBinding() types.Endpoint {
@@ -331,7 +471,7 @@ func (c *Connection) GetStatus() types.ConnectionState {
 		return types.ConnectionState_Disconnected
 	}
 
-	return c.status
+	return types.ConnectionState(atomic.LoadInt32((*int32)(&c.status)))
 }
 
 func (c *Connection) CheckFlag(flag types.ConnectionFlag) bool {
@@ -339,7 +479,7 @@ func (c *Connection) CheckFlag(flag types.ConnectionFlag) bool {
 		return false
 	}
 
-	return c.flags&uint32(flag) != 0
+	return atomic.LoadUint32(&c.flags)&uint32(flag) != 0
 }
 
 func (c *Connection) SetTemporary() {
@@ -347,7 +487,7 @@ func (c *Connection) SetTemporary() {
 		return
 	}
 
-	c.flags |= uint32(types.ConnectionFlag_Temporary)
+	c.setFlag(types.ConnectionFlag_Temporary, true)
 }
 
 func (c *Connection) GetStatistic() types.ConnectionStatistic {
@@ -375,7 +515,7 @@ func (c *Connection) RemoveOwnerChecker() {
 		return
 	}
 
-	c.owner.removeConnectionTimer(c)
+	c.owner.removeConnectionTimer(c, false)
 }
 
 func (c *Connection) setBinding(ep types.Endpoint) {
@@ -391,5 +531,12 @@ func (c *Connection) setStatus(status types.ConnectionState) {
 		return
 	}
 
-	c.status = status
+	old := types.ConnectionState(atomic.SwapInt32((*int32)(&c.status), int32(status)))
+	if old == status {
+		return
+	}
+
+	if c.owner != nil && status == types.ConnectionState_Connected {
+		c.owner.removeConnectionTimer(c, false)
+	}
 }

@@ -19,25 +19,37 @@ import (
 	types "github.com/atframework/libatbus-go/types"
 )
 
-// Golang暂不支持单工通道
-func buildSupportedChannelSchemes() map[string]struct{} {
-	ret := make(map[string]struct{})
-	ret["dns"] = struct{}{}
-	ret["ipv4"] = struct{}{}
-	ret["ipv6"] = struct{}{}
-	ret["atcp"] = struct{}{}
-	ret["unix"] = struct{}{}
-	ret["pipe"] = struct{}{}
-	return ret
+var supportedChannelSchemes = map[string]struct{}{
+	"dns": {}, "ipv4": {}, "ipv6": {}, "atcp": {}, "unix": {}, "pipe": {},
 }
 
-var _supportedChannelSchemes map[string]struct{} = nil
+const kAddressPriorityMultiplier = 65536
 
-func getSupportedChannelSchemes() map[string]struct{} {
-	if _supportedChannelSchemes == nil {
-		_supportedChannelSchemes = buildSupportedChannelSchemes()
+func checkReachable(gw types.Gateway, epScope string, epNamespace string, epHostname string, epLabels map[string]string) bool {
+	if gw.MatchScope != "" && gw.MatchScope != epScope {
+		return false
 	}
-	return _supportedChannelSchemes
+
+	if len(gw.MatchNamespaces) > 0 {
+		if _, ok := gw.MatchNamespaces[epNamespace]; !ok {
+			return false
+		}
+	}
+
+	if len(gw.MatchHosts) > 0 {
+		if _, ok := gw.MatchHosts[epHostname]; !ok {
+			return false
+		}
+	}
+
+	for k, v := range gw.MatchLabels {
+		epVal, ok := epLabels[k]
+		if !ok || epVal != v {
+			return false
+		}
+	}
+
+	return true
 }
 
 func getConnectionBinding(conn types.Connection) types.Endpoint {
@@ -175,11 +187,17 @@ func GenerateAccessDataWithTimestamp(ad *protocol.AccessData, busID types.BusIdT
 
 // GenerateAccessDataForCustomCommand mirrors the C++ overload that takes custom_command_data.
 func GenerateAccessDataForCustomCommand(ad *protocol.AccessData, busID types.BusIdType, nonce1, nonce2 uint64, accessTokens [][]byte, cs *protocol.CustomCommandData) {
+	GenerateAccessDataForCustomCommandWithTimestamp(ad, busID, nonce1, nonce2, accessTokens, cs, time.Now().Unix())
+}
+
+// GenerateAccessDataForCustomCommandWithTimestamp is like GenerateAccessDataForCustomCommand
+// but allows specifying a fixed timestamp for cross-language verification tests.
+func GenerateAccessDataForCustomCommandWithTimestamp(ad *protocol.AccessData, busID types.BusIdType, nonce1, nonce2 uint64, accessTokens [][]byte, cs *protocol.CustomCommandData, timestamp int64) {
 	if ad == nil {
 		return
 	}
 	ad.Algorithm = protocol.ATBUS_ACCESS_DATA_ALGORITHM_TYPE_ATBUS_ACCESS_DATA_ALGORITHM_HMAC_SHA256
-	ad.Timestamp = time.Now().Unix()
+	ad.Timestamp = timestamp
 	ad.Nonce1 = nonce1
 	ad.Nonce2 = nonce2
 
@@ -329,13 +347,13 @@ func SendMessage(n types.Node, conn types.Connection, m *types.Message) error_co
 	buf, errCode := PackMessage(conn.GetConnectionContext(), m, n.GetProtocolVersion(), int(n.GetConfigure().MessageSize))
 	if errCode != error_code.EN_ATBUS_ERR_SUCCESS {
 		n.LogDebug(getConnectionBinding(conn), conn, m, "package message failed")
-		n.LogError(getConnectionBinding(conn), conn, int(errCode), errCode, "package message failed")
+		n.LogError(getConnectionBinding(conn), conn, 0, errCode, "package message failed")
 		return errCode
 	}
 
 	if buf == nil {
 		n.LogDebug(getConnectionBinding(conn), conn, m, "package message failed with unknown error")
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_INNER), error_code.EN_ATBUS_ERR_INNER, "package message failed with unknown error")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_INNER, "package message failed with unknown error")
 		return error_code.EN_ATBUS_ERR_INNER
 	}
 
@@ -372,14 +390,14 @@ func SendPing(n types.Node, conn types.Connection, messageSequence uint64) error
 				n.GetTimerTick().Add(refreshInterval).Before(conn.GetConnectionContext().GetHandshakeStartTime())) {
 			resultCode := conn.GetConnectionContext().HandshakeGenerateSelfKey(body.GetCryptoHandshake().GetSequence())
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
-				n.LogError(getConnectionBinding(conn), conn, int(resultCode), resultCode, "node send ping but handshake refresh secret failed")
+				n.LogError(getConnectionBinding(conn), conn, 0, resultCode, "node send ping but handshake refresh secret failed")
 			} else {
 				resultCode = conn.GetConnectionContext().HandshakeWriteSelfPublicKey(
 					body.MutableCryptoHandshake(),
 					n.GetConfigure().CryptoAllowAlgorithms,
 				)
 				if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
-					n.LogError(getConnectionBinding(conn), conn, int(resultCode), resultCode, "node send ping but write public key failed")
+					n.LogError(getConnectionBinding(conn), conn, 0, resultCode, "node send ping but write public key failed")
 				}
 			}
 		}
@@ -411,33 +429,66 @@ func SendRegister(bodyType types.MessageBodyType, n types.Node, conn types.Conne
 	head.SourceBusId = uint64(n.GetId())
 	head.ResultCode = int32(errcode)
 
-	if body.Channels == nil {
-		body.Channels = make([]*protocol.ChannelData, 0, len(n.GetListenList()))
-	}
-
-	for _, addr := range n.GetListenList() {
-		ch := body.AddChannels()
-		if ch == nil {
-			continue
+	gateways := n.GetGatewayAddress()
+	if len(gateways) == 0 {
+		listenList := n.GetListenList()
+		if body.Channels == nil {
+			body.Channels = make([]*protocol.ChannelData, 0, len(listenList))
 		}
-		ch.Address = addr.GetAddress()
+		for _, addr := range listenList {
+			if addr == nil || addr.GetAddress() == "" {
+				continue
+			}
+			ch := body.AddChannels()
+			if ch == nil {
+				continue
+			}
+			n.DumpListenToChannelData(addr.GetAddress(), ch)
+		}
+	} else {
+		if body.Channels == nil {
+			body.Channels = make([]*protocol.ChannelData, 0, len(gateways))
+		}
+		for _, gw := range gateways {
+			if gw.Address == "" {
+				continue
+			}
+			ch := body.AddChannels()
+			if ch == nil {
+				continue
+			}
+			types.DumpGatewayToChannelData(gw, ch)
+		}
 	}
 
 	body.BusId = uint64(n.GetId())
-	body.Pid = int32(n.GetPid())
-	body.Hostname = n.GetHostname()
+	body.Pid = n.GetSelfPid()
+	body.Hostname = n.GetSelfHostname()
+
+	// 上报部署集群标识，对端用它们判定本端通告地址的可达性
+	nodeConf := n.GetConfigure()
+	if nodeConf != nil {
+		body.Scope = nodeConf.Scope
+		body.NamespaceName = nodeConf.NamespaceName
+		if len(nodeConf.NodeLabels) > 0 {
+			body.Labels = make(map[string]string, len(nodeConf.NodeLabels))
+			for k, v := range nodeConf.NodeLabels {
+				body.Labels[k] = v
+			}
+		}
+	}
 
 	selfEp := n.GetSelfEndpoint()
 	if selfEp == nil {
-		n.LogError(selfEp, nil, int(error_code.EN_ATBUS_ERR_NOT_INITED), error_code.EN_ATBUS_ERR_NOT_INITED, "node not inited")
+		n.LogError(selfEp, nil, 0, error_code.EN_ATBUS_ERR_NOT_INITED, "node not inited")
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
 	body.Flags = uint32(selfEp.GetFlags())
 
-	for scheme := range getSupportedChannelSchemes() {
+	for scheme := range supportedChannelSchemes {
 		if body.SupportedChannelSchema == nil {
-			body.SupportedChannelSchema = make([]string, 0, len(getSupportedChannelSchemes()))
+			body.SupportedChannelSchema = make([]string, 0, len(supportedChannelSchemes))
 		}
 		body.SupportedChannelSchema = append(body.SupportedChannelSchema, scheme)
 	}
@@ -460,7 +511,7 @@ func SendRegister(bodyType types.MessageBodyType, n types.Node, conn types.Conne
 		conn.GetConnectionContext().GetCryptoKeyExchangeAlgorithm() != protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
 		resultCode := conn.GetConnectionContext().HandshakeGenerateSelfKey(body.GetCryptoHandshake().GetSequence())
 		if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(getConnectionBinding(conn), conn, int(resultCode), resultCode, "node send register but handshake generate self key failed")
+			n.LogError(getConnectionBinding(conn), conn, 0, resultCode, "node send register but handshake generate self key failed")
 			return resultCode
 		}
 	}
@@ -525,7 +576,7 @@ func SendTransferResponse(n types.Node, m *Message, errcode error_code.ErrorType
 
 	ret, ep, conn := n.SendCtrlMessage(types.BusIdType(originFrom), m, nil)
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(ep, conn, int(ret), ret, fmt.Sprintf("send control message to %v failed", originFrom))
+		n.LogError(ep, conn, 0, ret, fmt.Sprintf("send control message to %v failed", originFrom))
 	}
 
 	return ret
@@ -582,7 +633,7 @@ func forwardDataMessage(n types.Node, m *Message, fromServerId types.BusIdType, 
 	}
 
 	if m == nil || 0 == toServerId || n.GetId() == toServerId {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_PARAMS), error_code.EN_ATBUS_ERR_PARAMS, "invalid parameters")
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_PARAMS, "invalid parameters")
 		return error_code.EN_ATBUS_ERR_PARAMS, nil
 	}
 
@@ -593,18 +644,18 @@ func forwardDataMessage(n types.Node, m *Message, fromServerId types.BusIdType, 
 	}, opts)
 
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(targetEp, targetConn, int(ret), ret, fmt.Sprintf("get peer channel to %v failed", toServerId))
+		n.LogError(targetEp, targetConn, 0, ret, fmt.Sprintf("get peer channel to %v failed", toServerId))
 		return ret, targetEp
 	}
 
 	if lu.IsNil(targetConn) || lu.IsNil(targetEp) {
-		n.LogError(targetEp, targetConn, int(error_code.EN_ATBUS_ERR_CONNECTION_NOT_FOUND),
+		n.LogError(targetEp, targetConn, 0,
 			error_code.EN_ATBUS_ERR_CONNECTION_NOT_FOUND, "no available target")
 		return error_code.EN_ATBUS_ERR_CONNECTION_NOT_FOUND, targetEp
 	}
 
 	if fromServerId == 0 && targetEp.GetId() == fromServerId {
-		n.LogError(targetEp, targetConn, int(error_code.EN_ATBUS_ERR_ATNODE_SRC_DST_IS_SAME),
+		n.LogError(targetEp, targetConn, 0,
 			error_code.EN_ATBUS_ERR_ATNODE_SRC_DST_IS_SAME, "same source and target")
 		return error_code.EN_ATBUS_ERR_ATNODE_SRC_DST_IS_SAME, targetEp
 	}
@@ -623,7 +674,7 @@ func onRecvDataTransferReq(n types.Node, conn types.Connection, m *Message, stat
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeDataTransformReq &&
 		bodyType != types.MessageBodyTypeDataTransformRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -637,7 +688,7 @@ func onRecvDataTransferReq(n types.Node, conn types.Connection, m *Message, stat
 	head := m.GetHead()
 	connIsNil := lu.IsNil(conn)
 	if head == nil || fwdData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 
 		if !connIsNil {
 			conn.AddStatisticFault()
@@ -654,12 +705,12 @@ func onRecvDataTransferReq(n types.Node, conn types.Connection, m *Message, stat
 	}
 
 	if connIsNil && head.GetSourceBusId() != uint64(n.GetId()) {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no connection")
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no connection")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
 	if !connIsNil && conn.GetStatus() != types.ConnectionState_Connected {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_NOT_READY), error_code.EN_ATBUS_ERR_NOT_READY, "connection not ready")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_NOT_READY, "connection not ready")
 		return error_code.EN_ATBUS_ERR_NOT_READY
 	}
 
@@ -718,7 +769,7 @@ func onRecvDataTransferReq(n types.Node, conn types.Connection, m *Message, stat
 	}
 
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(getConnectionBinding(conn), conn, int(ret), ret, "forward data message failed")
+		n.LogError(getConnectionBinding(conn), conn, 0, ret, "forward data message failed")
 	}
 
 	return ret
@@ -732,7 +783,7 @@ func onRecvDataTransferRsp(n types.Node, conn types.Connection, m *Message, stat
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeDataTransformReq &&
 		bodyType != types.MessageBodyTypeDataTransformRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -746,7 +797,7 @@ func onRecvDataTransferRsp(n types.Node, conn types.Connection, m *Message, stat
 	head := m.GetHead()
 	connIsNil := lu.IsNil(conn)
 	if head == nil || fwdData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 
 		if !connIsNil {
 			conn.AddStatisticFault()
@@ -755,12 +806,12 @@ func onRecvDataTransferRsp(n types.Node, conn types.Connection, m *Message, stat
 	}
 
 	if connIsNil && head.GetSourceBusId() != uint64(n.GetId()) {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no connection")
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no connection")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
 	if !connIsNil && conn.GetStatus() != types.ConnectionState_Connected {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_NOT_READY), error_code.EN_ATBUS_ERR_NOT_READY, "connection not ready")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_NOT_READY, "connection not ready")
 		return error_code.EN_ATBUS_ERR_NOT_READY
 	}
 
@@ -770,7 +821,7 @@ func onRecvDataTransferRsp(n types.Node, conn types.Connection, m *Message, stat
 	if fwdData.GetTo() == uint64(n.GetId()) {
 		ep := getConnectionBinding(conn)
 		if head.GetResultCode() < 0 {
-			n.LogError(ep, conn, int(head.GetResultCode()), error_code.ErrorType(head.GetResultCode()), "receive data transfer response with error code")
+			n.LogError(ep, conn, 0, error_code.ErrorType(head.GetResultCode()), "receive data transfer response with error code")
 		}
 
 		n.OnReceiveForwardResponse(ep, conn, m)
@@ -790,7 +841,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeCustomCommandReq &&
 		bodyType != types.MessageBodyTypeCustomCommandRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -803,7 +854,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 
 	head := m.GetHead()
 	if head == nil || cmdData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 		if !lu.IsNil(conn) {
 			conn.AddStatisticFault()
 		}
@@ -814,7 +865,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 	if head.GetVersion() < n.GetProtocolMinimalVersion() {
 		rspData := make([][]byte, 0, 1)
 		rspData = append(rspData, []byte("Access Deny - Unsupported Version"))
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION), error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION,
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION,
 			fmt.Sprintf("custom command version %v is lower than minimal supported %v", head.GetVersion(), n.GetProtocolMinimalVersion()),
 		)
 
@@ -828,7 +879,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 
 	// message from self has no connection
 	if lu.IsNil(conn) && cmdData.GetFrom() != uint64(n.GetId()) {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 			"message from self but from bus id not match",
 		)
 		return error_code.EN_ATBUS_ERR_BAD_DATA
@@ -842,7 +893,7 @@ func onRecvCustomCommandReq(n types.Node, conn types.Connection, m *Message, sta
 	), conn) {
 		rspData := make([][]byte, 0, 1)
 		rspData = append(rspData, []byte("Access Deny - Invalid Token"))
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_ACCESS_DENY), error_code.EN_ATBUS_ERR_ACCESS_DENY,
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_ACCESS_DENY,
 			fmt.Sprintf("access deny from %v, invalid token", cmdData.GetFrom()),
 		)
 		return SendCustomCommandResponse(n, conn, rspData, head.GetType(), error_code.EN_ATBUS_ERR_ACCESS_DENY,
@@ -873,7 +924,7 @@ func onRecvCustomCommandRsp(n types.Node, conn types.Connection, m *Message, sta
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeCustomCommandReq &&
 		bodyType != types.MessageBodyTypeCustomCommandRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -886,7 +937,7 @@ func onRecvCustomCommandRsp(n types.Node, conn types.Connection, m *Message, sta
 
 	head := m.GetHead()
 	if head == nil || cmdData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no custom_command_data")
 		if !lu.IsNil(conn) {
 			conn.AddStatisticFault()
 		}
@@ -895,7 +946,7 @@ func onRecvCustomCommandRsp(n types.Node, conn types.Connection, m *Message, sta
 
 	// message from self has no connection
 	if lu.IsNil(conn) && cmdData.GetFrom() != uint64(n.GetId()) {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 			"message from self but from bus id not match",
 		)
 		return error_code.EN_ATBUS_ERR_BAD_DATA
@@ -913,12 +964,13 @@ func acceptNodeRegistrationStepMakeEndpoint(n types.Node, conn types.Connection,
 	if conn.IsConnected() {
 		ep := conn.GetBinding()
 		if ep == nil || ep.GetId() != types.BusIdType(regData.GetBusId()) {
-			n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ATNODE_BUS_ID_NOT_MATCH), error_code.EN_ATBUS_ERR_ATNODE_BUS_ID_NOT_MATCH, "bus id not match")
+			n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ATNODE_BUS_ID_NOT_MATCH, "bus id not match")
 			conn.Reset()
 			return error_code.EN_ATBUS_ERR_ATNODE_BUS_ID_NOT_MATCH, ep
 		}
 
 		ep.UpdateHashCode(regData.GetHashCode())
+		ep.ReloadFromProtocol(regData.GetScope(), regData.GetNamespaceName(), regData.GetLabels(), regData.GetChannels())
 		n.LogInfo(ep, conn, "connection already connected receive register again")
 		return error_code.EN_ATBUS_ERR_SUCCESS, ep
 	}
@@ -938,7 +990,7 @@ func acceptNodeRegistrationStepMakeEndpoint(n types.Node, conn types.Connection,
 	if !lu.IsNil(ep) {
 		// 检测机器名和进程号必须一致,自己是临时节点则不需要检查
 		if 0 != n.GetId() && (ep.GetPid() != regData.GetPid() || ep.GetHostname() != hostName) {
-			n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ATNODE_ID_CONFLICT), error_code.EN_ATBUS_ERR_ATNODE_ID_CONFLICT,
+			n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ATNODE_ID_CONFLICT,
 				fmt.Sprintf("bus id %v already exists with different hostname or pid (old: %v/%v, new: %v/%v)",
 					regData.GetBusId(), ep.GetHostname(), ep.GetPid(), hostName, regData.GetPid(),
 				),
@@ -947,13 +999,14 @@ func acceptNodeRegistrationStepMakeEndpoint(n types.Node, conn types.Connection,
 			return error_code.EN_ATBUS_ERR_ATNODE_ID_CONFLICT, ep
 		} else if !ep.AddConnection(conn, conn.CheckFlag(types.ConnectionFlag_AccessShareHost)) {
 			// 有共享物理机限制的连接只能加为数据节点（一般就是内存通道或者共享内存通道）
-			n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ATNODE_NO_CONNECTION),
+			n.LogError(ep, conn, 0,
 				error_code.EN_ATBUS_ERR_ATNODE_NO_CONNECTION, "add connection to endpoint failed")
 			conn.Reset()
 			return error_code.EN_ATBUS_ERR_ATNODE_NO_CONNECTION, ep
 		}
 
 		ep.UpdateHashCode(regData.GetHashCode())
+		ep.ReloadFromProtocol(regData.GetScope(), regData.GetNamespaceName(), regData.GetLabels(), regData.GetChannels())
 		n.LogDebug(ep, conn, m, "connection added to existed endpoint")
 		return error_code.EN_ATBUS_ERR_SUCCESS, ep
 	}
@@ -962,16 +1015,17 @@ func acceptNodeRegistrationStepMakeEndpoint(n types.Node, conn types.Connection,
 	ep = n.CreateEndpoint(types.BusIdType(regData.GetBusId()), hostName, int(regData.GetPid()))
 	if lu.IsNil(ep) {
 		n.LogDebug(nil, conn, m, "malloc endpoint failed")
-		n.LogError(nil, conn, int(error_code.EN_ATBUS_ERR_MALLOC),
+		n.LogError(nil, conn, 0,
 			error_code.EN_ATBUS_ERR_MALLOC, "malloc endpoint failed")
 		conn.Reset()
 		return error_code.EN_ATBUS_ERR_MALLOC, nil
 	}
 	ep.UpdateHashCode(regData.GetHashCode())
+	ep.ReloadFromProtocol(regData.GetScope(), regData.GetNamespaceName(), regData.GetLabels(), regData.GetChannels())
 
 	ret := n.AddEndpoint(ep)
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(ep, conn, int(ret), ret, "add endpoint to node failed")
+		n.LogError(ep, conn, 0, ret, "add endpoint to node failed")
 		conn.Reset()
 		return ret, ep
 	}
@@ -985,7 +1039,7 @@ func acceptNodeRegistrationStepMakeEndpoint(n types.Node, conn types.Connection,
 func acceptNodeRegistrationStepUpdateEndpoint(n types.Node, ep types.Endpoint, conn types.Connection, regData *protocol.RegisterData) {
 	supportedSchemes := make([]string, 0, len(regData.GetSupportedChannelSchema()))
 	for _, scheme := range regData.GetSupportedChannelSchema() {
-		if _, ok := getSupportedChannelSchemes()[scheme]; ok {
+		if _, ok := supportedChannelSchemes[scheme]; ok {
 			supportedSchemes = append(supportedSchemes, strings.ToLower(scheme))
 		}
 	}
@@ -1032,70 +1086,151 @@ func calculateChannelAddressPriority(addr string, isSameHost bool, isSameProcess
 	return ret
 }
 
-func acceptNodeRegistrationStepDataChannel(n types.Node, ep types.Endpoint, conn types.Connection, regData *protocol.RegisterData) error_code.ErrorType {
+func acceptNodeRegistrationStepDataChannel(n types.Node, ep types.Endpoint, conn types.Connection, regData *protocol.RegisterData, isUpstream bool) error_code.ErrorType {
 	// 如果双方一边有IOS通道，另一边没有，则没有的连接有的
 	// 如果双方都有IOS通道，则CLIENT端连接SERVER端
-	isSameHost := ep.GetHostname() == n.GetHostname()
-	isSameProcess := isSameHost && int(ep.GetPid()) == n.GetPid()
+	isSameHost := ep.GetHostname() == n.GetSelfHostname()
+	isSameProcess := isSameHost && ep.GetPid() == n.GetSelfPid()
 	hasDataConnectionSuccess := false
+
+	// 注册回包只会出现在本端主动发起的连接上（只有客户端连接才会发出注册请求），
+	// 其地址是发起连接时使用的对端地址（或上游配置地址），是已知可达的；accept 的连接地址是对端的临时端口，不可用于回连。
+	// 此时仅接受对端上报的本机地址，其余地址统一改用已知可达地址。
+	knownReachableAddress := ""
+	if conn.CheckFlag(types.ConnectionFlag_ClientMode) {
+		if isUpstream && n.GetConfigure().UpstreamAddress != "" {
+			knownReachableAddress = n.GetConfigure().UpstreamAddress
+		} else if conn.GetAddress() != nil {
+			knownReachableAddress = conn.GetAddress().GetAddress()
+		}
+	}
 
 	// 如果SERVER端判定出对方可能会通过双工通道再连接自己一次，就不用反向发起数据连接。
 	if conn.CheckFlag(types.ConnectionFlag_ServerMode) {
 		endpointSelectPriority := 0
 		endpointSelectAddress := ""
-		for _, addr := range n.GetListenList() {
-			if !ep.IsSchemeSupported(addr.GetScheme()) {
-				continue
-			}
+		nodeGateways := n.GetGatewayAddress()
+		if len(nodeGateways) > 0 {
+			for _, gw := range nodeGateways {
+				addr, ok := channel_utility.MakeAddress(gw.Address)
+				if !ok || addr == nil {
+					continue
+				}
+				if !ep.IsSchemeSupported(addr.GetScheme()) {
+					continue
+				}
 
-			_, exists := getSupportedChannelSchemes()[addr.GetScheme()]
-			if !exists {
-				continue
-			}
+				_, exists := supportedChannelSchemes[addr.GetScheme()]
+				if !exists {
+					continue
+				}
 
-			checkPriority := calculateChannelAddressPriority(addr.GetAddress(), isSameHost, isSameProcess)
-			if checkPriority > endpointSelectPriority {
-				endpointSelectPriority = checkPriority
-				endpointSelectAddress = addr.GetAddress()
+				if !checkReachable(gw, regData.GetScope(), regData.GetNamespaceName(), regData.GetHostname(), regData.GetLabels()) {
+					continue
+				}
+
+				checkPriority := calculateChannelAddressPriority(addr.GetAddress(), isSameHost, isSameProcess)
+				if checkPriority > endpointSelectPriority {
+					endpointSelectPriority = checkPriority
+					endpointSelectAddress = gw.Address
+				}
+			}
+		} else if (n.GetConfigure().Scope == "" || n.GetConfigure().Scope == regData.GetScope()) &&
+			(n.GetConfigure().NamespaceName == "" || n.GetConfigure().NamespaceName == regData.GetNamespaceName()) {
+			// 尝试listen地址时要求scope和namespace匹配
+			for _, addr := range n.GetListenList() {
+				if addr == nil {
+					continue
+				}
+				if !ep.IsSchemeSupported(addr.GetScheme()) {
+					continue
+				}
+
+				_, exists := supportedChannelSchemes[addr.GetScheme()]
+				if !exists {
+					continue
+				}
+
+				checkPriority := calculateChannelAddressPriority(addr.GetAddress(), isSameHost, isSameProcess)
+				if checkPriority > endpointSelectPriority {
+					endpointSelectPriority = checkPriority
+					endpointSelectAddress = addr.GetAddress()
+				}
 			}
 		}
 
 		if endpointSelectAddress != "" && channel_utility.IsDuplexAddress(endpointSelectAddress) {
 			return error_code.EN_ATBUS_ERR_SUCCESS
 		}
+
+		// 如果可用的地址为空，下游会再使用代理地址连接，一定是通的。所以也不用主动发起连接
+		if endpointSelectAddress == "" {
+			return error_code.EN_ATBUS_ERR_SUCCESS
+		}
 	}
 
 	// io_stream channel only need one connection
 	// 按优先级尝试连接对方的地址列表，建立数据连接
+	peerGateways := ep.GetGateway()
+	gatewayCount := len(peerGateways)
 	addressPriorityList := make([]struct {
 		priority int
 		address  string
-	}, 0, len(regData.GetChannels()))
-	for _, ch := range regData.GetChannels() {
-		if ch == nil || ch.GetAddress() == "" {
+	}, 0, gatewayCount+1)
+
+	for index, gw := range peerGateways {
+		if gw.Address == "" {
 			continue
 		}
 
-		if !isSameProcess && channel_utility.IsLocalProcessAddress(ch.GetAddress()) {
+		isPeerLocalProcessAddress := channel_utility.IsLocalProcessAddress(gw.Address)
+		if isPeerLocalProcessAddress && !isSameProcess {
 			continue
 		}
 
-		if !isSameHost && channel_utility.IsLocalHostAddress(ch.GetAddress()) {
+		isPeerLocalHostAddress := channel_utility.IsLocalHostAddress(gw.Address)
+		if isPeerLocalHostAddress && !isSameHost {
 			continue
 		}
 
-		addr, _ := channel_utility.MakeAddress(ch.GetAddress())
-		_, exists := getSupportedChannelSchemes()[addr.GetScheme()]
+		// 如果存在已知可达的地址（上游配置或当前注册连接的地址），则仅接受更高优先级的本机地址
+		if !isPeerLocalHostAddress && knownReachableAddress != "" {
+			continue
+		}
+
+		if !checkReachable(gw, n.GetConfigure().Scope, n.GetConfigure().NamespaceName, n.GetSelfHostname(), n.GetConfigure().NodeLabels) {
+			continue
+		}
+
+		addr, ok := channel_utility.MakeAddress(gw.Address)
+		if !ok || addr == nil {
+			continue
+		}
+		_, exists := supportedChannelSchemes[addr.GetScheme()]
 		if !exists {
 			continue
 		}
 
+		priority := calculateChannelAddressPriority(gw.Address, isSameHost, isSameProcess)
+		// 同类型优先级时，使用在通道列表中的顺序作为次级排序依据
 		addressPriorityList = append(addressPriorityList, struct {
 			priority int
 			address  string
 		}{
-			priority: calculateChannelAddressPriority(ch.GetAddress(), isSameHost, isSameProcess),
-			address:  ch.GetAddress(),
+			priority: priority*kAddressPriorityMultiplier + gatewayCount - index,
+			address:  gw.Address,
+		})
+	}
+
+	// 如果没有可用的更高优先级的地址，则使用已知可达的地址（上游配置或当前注册连接的地址）
+	if len(addressPriorityList) == 0 && knownReachableAddress != "" {
+		priority := calculateChannelAddressPriority(knownReachableAddress, isSameHost, isSameProcess)
+		addressPriorityList = append(addressPriorityList, struct {
+			priority int
+			address  string
+		}{
+			priority: priority * kAddressPriorityMultiplier,
+			address:  knownReachableAddress,
 		})
 	}
 
@@ -1125,7 +1260,7 @@ func acceptNodeRegistrationStepDataChannel(n types.Node, ep types.Endpoint, conn
 
 		res := n.ConnectWithEndpoint(addrInfo.address, ep)
 		if res != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(ep, conn, int(res), res, fmt.Sprintf("connect to address %s failed", addrInfo.address))
+			n.LogError(ep, conn, 0, res, fmt.Sprintf("connect to address %s failed", addrInfo.address))
 			ret = res
 			continue
 		}
@@ -1144,7 +1279,7 @@ func acceptNodeRegistrationStepDataChannel(n types.Node, ep types.Endpoint, conn
 	return ret
 }
 
-func acceptNodeRegistration(n types.Node, conn types.Connection, m *Message, regData *protocol.RegisterData) (error_code.ErrorType, types.Endpoint) {
+func acceptNodeRegistration(n types.Node, conn types.Connection, m *Message, regData *protocol.RegisterData, isUpstream bool) (error_code.ErrorType, types.Endpoint) {
 	if lu.IsNil(n) || lu.IsNil(conn) || m == nil || regData == nil {
 		return error_code.EN_ATBUS_ERR_PARAMS, nil
 	}
@@ -1167,7 +1302,7 @@ func acceptNodeRegistration(n types.Node, conn types.Connection, m *Message, reg
 		return ret, ep
 	}
 
-	ret = acceptNodeRegistrationStepDataChannel(n, ep, conn, regData)
+	ret = acceptNodeRegistrationStepDataChannel(n, ep, conn, regData, isUpstream)
 	return ret, ep
 }
 
@@ -1179,7 +1314,7 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeNodeRegisterReq &&
 		bodyType != types.MessageBodyTypeNodeRegisterRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -1193,7 +1328,7 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 	head := m.GetHead()
 	connIsNil := lu.IsNil(conn)
 	if connIsNil || head == nil || regData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
 		if !connIsNil {
 			conn.AddStatisticFault()
 		}
@@ -1206,7 +1341,7 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 		ret := SendRegister(types.MessageBodyTypeNodeRegisterRsp, n, conn, error_code.EN_ATBUS_ERR_UNSUPPORTED_VERSION,
 			head.GetSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(getConnectionBinding(conn), conn, int(ret), ret, fmt.Sprintf("send unsupported version %d register response failed", head.GetVersion()))
+			n.LogError(getConnectionBinding(conn), conn, 0, ret, fmt.Sprintf("send unsupported version %d register response failed", head.GetVersion()))
 		}
 		if !connIsNil {
 			conn.Reset()
@@ -1247,24 +1382,24 @@ func onRecvNodeRegisterReq(n types.Node, conn types.Connection, m *Message, stat
 			return resultCode, nil
 		}
 
-		return acceptNodeRegistration(n, conn, m, regData)
+		return acceptNodeRegistration(n, conn, m, regData, false)
 	}()
 
 	if responseCode != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(getConnectionBinding(conn), conn, int(responseCode), responseCode, fmt.Sprintf("access deny from %v, invalid token", regData.GetBusId()))
+		n.LogError(getConnectionBinding(conn), conn, 0, responseCode, fmt.Sprintf("access deny from %v, invalid token", regData.GetBusId()))
 		ret := SendRegister(types.MessageBodyTypeNodeRegisterRsp, n, conn, responseCode, head.GetSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(getConnectionBinding(conn), conn, int(ret), ret, fmt.Sprintf("send register response to %d failed", regData.GetBusId()))
+			n.LogError(getConnectionBinding(conn), conn, 0, ret, fmt.Sprintf("send register response to %d failed", regData.GetBusId()))
 			conn.Reset()
-			return ret
 		}
+		return ret
 	}
 
 	// 仅fd连接发回注册回包，否则忽略（内存和共享内存通道为单工通道）
 	if conn.CheckFlag(types.ConnectionFlag_RegFd) {
 		ret := SendRegister(types.MessageBodyTypeNodeRegisterRsp, n, conn, responseCode, head.GetSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(getConnectionBinding(conn), conn, int(ret), ret, fmt.Sprintf("send register response to %d failed", regData.GetBusId()))
+			n.LogError(getConnectionBinding(conn), conn, 0, ret, fmt.Sprintf("send register response to %d failed", regData.GetBusId()))
 			conn.Reset()
 		} else {
 			// 注册事件触发
@@ -1285,7 +1420,7 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 	bodyType := m.GetBodyType()
 	if bodyType != types.MessageBodyTypeNodeRegisterReq &&
 		bodyType != types.MessageBodyTypeNodeRegisterRsp {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "invalid body type")
 		return error_code.EN_ATBUS_ERR_BAD_DATA
 	}
 
@@ -1299,7 +1434,7 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 	head := m.GetHead()
 	connIsNil := lu.IsNil(conn)
 	if connIsNil || head == nil || regData == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA, "no head or no node_register_data")
 		if !connIsNil {
 			conn.AddStatisticFault()
 		}
@@ -1330,9 +1465,6 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
 				return resultCode, nil
 			}
-
-			// 发送 handshake_confirm 通知对端完成密钥切换
-			SendHandshakeConfirm(n, conn, regData.GetCryptoHandshake().GetSequence())
 		}
 
 		resultCode = conn.GetConnectionContext().UpdateCompressionAlgorithm(regData.GetSupportedCompressionAlgorithm())
@@ -1341,10 +1473,14 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 		}
 
 		// 先刷新拓扑关系
-		if n.GetId() != 0 && regData.GetBusId() != 0 && conn.GetAddress().GetAddress() == n.GetConfigure().UpstreamAddress {
+		isUpstream := false
+		if n.GetId() != 0 && regData.GetBusId() != 0 &&
+			(conn.GetAddress().GetAddress() == n.GetConfigure().UpstreamAddress ||
+				conn.GetOriginAddress() == n.GetConfigure().UpstreamAddress) {
 			n.SetTopologyUpstream(types.BusIdType(regData.GetBusId()))
+			isUpstream = true
 		}
-		return acceptNodeRegistration(n, conn, m, regData)
+		return acceptNodeRegistration(n, conn, m, regData, isUpstream)
 	}(ret)
 
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
@@ -1356,11 +1492,13 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 		}
 
 		// 如果是父节点回的错误注册包，且未被激活过，则要关闭进程
-		if conn.GetAddress().GetAddress() == n.GetConfigure().UpstreamAddress && !n.CheckFlag(types.NodeFlag_Actived) {
+		if (conn.GetAddress().GetAddress() == n.GetConfigure().UpstreamAddress ||
+			conn.GetOriginAddress() == n.GetConfigure().UpstreamAddress) &&
+			!n.CheckFlag(types.NodeFlag_Actived) {
 			n.LogDebug(ep, conn, m, "node register to parent node failed, shutdown")
 			n.FatalShutdown(ep, conn, ret, fmt.Errorf("node register to parent node failed, shutdown"))
 		} else {
-			n.LogError(ep, conn, int(ret), ret, "node register failed")
+			n.LogError(ep, conn, 0, ret, fmt.Sprintf("node register failed, result_code: %d", head.GetResultCode()))
 		}
 
 		n.OnRegister(ep, conn, ret)
@@ -1368,8 +1506,16 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 		return ret
 	}
 
+	// 发回确认握手成功的消息，客户端收到后才会正式建立连接并进入在线状态
+	confirmRet := SendHandshakeConfirm(n, conn, regData.GetCryptoHandshake().GetSequence())
+	if confirmRet != error_code.EN_ATBUS_ERR_SUCCESS {
+		n.LogError(ep, conn, 0, confirmRet, fmt.Sprintf("send handshake confirm to %v failed", regData.GetBusId()))
+		conn.Reset()
+		return confirmRet
+	}
+
 	// 注册事件触发
-	n.OnRegister(ep, conn, ret)
+	n.OnRegister(ep, conn, error_code.ErrorType(head.GetResultCode()))
 
 	if types.NodeState_ConnectingUpstream == n.GetState() {
 		// 父节点返回的rsp成功则可以上线
@@ -1382,7 +1528,7 @@ func onRecvNodeRegisterRsp(n types.Node, conn types.Connection, m *Message, stat
 		}
 	}
 
-	return ret
+	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int, errcode error_code.ErrorType) error_code.ErrorType {
@@ -1392,7 +1538,7 @@ func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int,
 
 	body := m.GetBody().GetNodePingReq()
 	if body == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 			"no head or no node_ping_req",
 		)
 		if !lu.IsNil(conn) {
@@ -1423,7 +1569,7 @@ func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int,
 					n.GetConfigure().CryptoAllowAlgorithms, true)
 			}
 			if retCode != error_code.EN_ATBUS_ERR_SUCCESS {
-				n.LogError(ep, conn, int(retCode), retCode, "ping handshake refresh secret failed")
+				n.LogError(ep, conn, 0, retCode, "ping handshake refresh secret failed")
 				withHandshake = false
 			}
 		}
@@ -1433,14 +1579,14 @@ func onRecvNodePing(n types.Node, conn types.Connection, m *Message, status int,
 		// 下发协商换密钥数据
 		{
 			responseM := types.NewMessage()
-			head := responseM.MutableHead()
+			responseHead := responseM.MutableHead()
 			pongBody := responseM.MutableBody().MutableNodePongRsp()
 
-			head.Version = n.GetProtocolVersion()
-			head.Sequence = head.GetSequence()
-			head.SourceBusId = uint64(n.GetId())
-			head.Type = head.GetType()
-			head.ResultCode = int32(retCode)
+			responseHead.Version = n.GetProtocolVersion()
+			responseHead.Sequence = head.GetSequence()
+			responseHead.SourceBusId = uint64(n.GetId())
+			responseHead.Type = head.GetType()
+			responseHead.ResultCode = int32(retCode)
 
 			pongBody.TimePoint = body.GetTimePoint()
 
@@ -1466,7 +1612,7 @@ func onRecvNodePong(n types.Node, conn types.Connection, m *Message, status int,
 
 	body := m.GetBody().GetNodePongRsp()
 	if body == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 			fmt.Sprintf("node recv node_ping from %v but without node_pong_rsp", m.GetHead().GetSourceBusId()),
 		)
 		if !lu.IsNil(conn) {
@@ -1485,12 +1631,19 @@ func onRecvNodePong(n types.Node, conn types.Connection, m *Message, status int,
 				n.GetConfigure().CryptoAllowAlgorithms, false)
 
 			if resultCode != error_code.EN_ATBUS_ERR_SUCCESS {
-				n.LogError(getConnectionBinding(conn), conn, int(resultCode), resultCode,
+				n.LogError(getConnectionBinding(conn), conn, 0, resultCode,
 					fmt.Sprintf("node recv node_pong from %v handshake refresh secret failed", m.GetHead().GetSourceBusId()),
 				)
+				conn.Reset()
 			} else {
 				// 发送 handshake_confirm 通知对端完成密钥切换
-				SendHandshakeConfirm(n, conn, body.GetCryptoHandshake().GetSequence())
+				confirmRet := SendHandshakeConfirm(n, conn, body.GetCryptoHandshake().GetSequence())
+				if confirmRet != error_code.EN_ATBUS_ERR_SUCCESS {
+					n.LogError(getConnectionBinding(conn), conn, 0, confirmRet,
+						fmt.Sprintf("send handshake confirm to %v failed", m.GetHead().GetSourceBusId()),
+					)
+					conn.Reset()
+				}
 			}
 		}
 
@@ -1514,7 +1667,7 @@ func onRecvHandshakeConfirm(n types.Node, conn types.Connection, m *Message, sta
 
 	body := m.GetBody().GetHandshakeConfirm()
 	if body == nil {
-		n.LogError(getConnectionBinding(conn), conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+		n.LogError(getConnectionBinding(conn), conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 			fmt.Sprintf("node recv handshake_confirm from %v but without handshake_confirm data", m.GetHead().GetSourceBusId()),
 		)
 		if !lu.IsNil(conn) {
@@ -1526,7 +1679,7 @@ func onRecvHandshakeConfirm(n types.Node, conn types.Connection, m *Message, sta
 	// 必须已经注册完成的 connection 才能处理 handshake_confirm
 	if !lu.IsNil(conn) {
 		if !conn.CheckFlag(types.ConnectionFlag_Temporary) && lu.IsNil(conn.GetBinding()) {
-			n.LogError(nil, conn, int(error_code.EN_ATBUS_ERR_BAD_DATA), error_code.EN_ATBUS_ERR_BAD_DATA,
+			n.LogError(nil, conn, 0, error_code.EN_ATBUS_ERR_BAD_DATA,
 				fmt.Sprintf("node recv handshake_confirm from %v but connection has no endpoint", m.GetHead().GetSourceBusId()),
 			)
 			conn.Reset()
@@ -1551,7 +1704,7 @@ func SendHandshakeConfirm(n types.Node, conn types.Connection, sequence uint64) 
 	confirmBody := responseM.MutableBody().MutableHandshakeConfirm()
 
 	head.Version = n.GetProtocolVersion()
-	head.Sequence = conn.GetConnectionContext().GetNextSequence()
+	head.Sequence = n.AllocateMessageSequence()
 	head.SourceBusId = uint64(n.GetId())
 	confirmBody.Sequence = sequence
 

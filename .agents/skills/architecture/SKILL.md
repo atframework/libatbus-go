@@ -48,18 +48,22 @@ types → protocol (for proto enums only)
 
 ```
 Main goroutine (caller of Proc)
-├── Node.Proc(now) — event loop tick
+├── Node.Poll() / Node.Proc(now) — dispatch queued I/O events
 │   ├── processPingTimers()
 │   ├── processConnectingTimeout()
 │   ├── executeGC()
 │   └── topology updates
 │
 Per-connection goroutines (channel/io_stream)
-├── readLoop()  — reads frames, dispatches to message_handle
-└── writeLoop() — writes queued frames, calls disconnect callbacks on error
+├── readLoop()  — reads and validates frames
+└── writeLoop() — writes queued frames
 ```
 
 ### Critical Synchronization Points
+
+Stream goroutines enqueue node events in a bounded queue. The node loop dispatches
+them in order so registration handlers and topology updates share one owner.
+Run node state operations on the same loop as Poll and Proc.
 
 1. **Endpoint mutex** (`sync.Mutex`):
    - Protects `ctrlConn`, `dataConn`, `flags`
@@ -104,9 +108,8 @@ Per-connection goroutines (channel/io_stream)
 The `executeGC()` function must match C++ behavior:
 
 1. Swap `pendingEndpointGcList` to a local slice (avoid modification during iteration)
-2. For each endpoint: check `IsAvailable()`, call `RemoveEndpoint()` if not
+2. Call `Reset()` on each unavailable endpoint to detach connections and cancel its ping timer before `RemoveEndpoint()` removes the route.
 3. `RemoveEndpoint()` handles state transitions (Running → LostUpstream for upstream endpoints)
-4. Do NOT call `ep.Reset()` redundantly — it races with I/O goroutine disconnect callbacks
 
 ### Connecting Timeout
 
@@ -143,6 +146,7 @@ All defaults align with C++ `libatbus`:
 | FirstIdleTimeout         | 30s     |
 | PingInterval             | 8s      |
 | RetryInterval            | 3s      |
+| MaxRetryInterval         | 60s     |
 | FaultTolerant            | 2       |
 | BackLog                  | 256     |
 | AccessTokenMaxNumber     | 5       |

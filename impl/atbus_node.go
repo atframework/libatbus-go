@@ -12,7 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,9 +45,12 @@ type nodeEventTimer struct {
 	tick time.Time
 
 	upstreamOpTimepoint     time.Time
+	upstreamOpRetryInterval time.Duration
 	pingListMu              sync.Mutex
 	pingList                types.TimerDescType[*Endpoint, *Endpoint]
-	connectingList          types.TimerDescType[string, *Connection]
+	connectingListMu        sync.Mutex
+	connectingListByChannel map[string]*Connection
+	connectingListByPtr     types.TimerDescType[*Connection, *Connection]
 	pendingEndpointGcList   list.List
 	pendingConnectionGcList list.List
 }
@@ -57,15 +60,26 @@ type endpointCollection struct {
 	endpointInterface map[types.BusIdType]types.Endpoint
 }
 
+type nodeIoStreamEvent struct {
+	kind   types.IoStreamCallbackEventType
+	conn   types.IoStreamConnection
+	result int32
+	data   []byte
+	size   int
+}
+
 type Node struct {
 	eventTimer    nodeEventTimer
 	eventCancelFn context.CancelFunc
 	flags         uint16
 	configure     types.NodeConfigure
 	hashCode      string
+	selfHostname  string
+	selfPid       int32
 
 	ioStreamConfigure *types.IoStreamConfigure
 	ioStreamChannel   types.IoStreamChannel
+	ioStreamEvents    chan nodeIoStreamEvent
 
 	// 加密配置
 	cryptoKeyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
@@ -88,6 +102,99 @@ type Node struct {
 	selfCommandMessages list.List
 
 	stat nodeStatistic
+}
+
+// 2026-01-01 00:00:00 UTC in microseconds (matches C++ kInitialSequenceOffset)
+const kInitialSequenceOffset uint64 = 1767225600 * 1000000
+
+// NewNode constructs a new Node instance with initialized sequence offset.
+func NewNode() *Node {
+	n := &Node{}
+	n.initMessageSequenceAllocator()
+	return n
+}
+
+func (n *Node) initMessageSequenceAllocator() {
+	if n == nil || n.messageSequenceAllocator.Load() != 0 {
+		return
+	}
+
+	nowMicros := time.Now().UnixMicro()
+	if nowMicros > int64(kInitialSequenceOffset) {
+		n.messageSequenceAllocator.CompareAndSwap(0, uint64(nowMicros)-kInitialSequenceOffset)
+	}
+}
+
+// nextUpstreamOpRetryInterval computes the next retry delay for upstream operations.
+// Matches C++ next_upstream_op_retry_interval: stays at RetryInterval before activation
+// or when MaxRetryInterval <= RetryInterval; doubles after activation up to MaxRetryInterval.
+func nextUpstreamOpRetryInterval(conf *types.NodeConfigure, current time.Duration, actived bool) time.Duration {
+	if conf == nil {
+		return 0
+	}
+	if current < conf.RetryInterval || conf.MaxRetryInterval <= conf.RetryInterval || !actived {
+		return conf.RetryInterval
+	}
+
+	if current > conf.MaxRetryInterval/2 {
+		return conf.MaxRetryInterval
+	}
+	return current * 2
+}
+
+func cloneNodeConfigure(dst *types.NodeConfigure, src *types.NodeConfigure) {
+	if dst == nil || src == nil {
+		return
+	}
+
+	*dst = *src
+
+	if len(src.TopologyLabels) > 0 {
+		dst.TopologyLabels = make(map[string]string, len(src.TopologyLabels))
+		for k, v := range src.TopologyLabels {
+			dst.TopologyLabels[k] = v
+		}
+	} else {
+		dst.TopologyLabels = nil
+	}
+
+	if len(src.NodeLabels) > 0 {
+		dst.NodeLabels = make(map[string]string, len(src.NodeLabels))
+		for k, v := range src.NodeLabels {
+			dst.NodeLabels[k] = v
+		}
+	} else {
+		dst.NodeLabels = nil
+	}
+
+	dst.Gateway = types.CloneGateways(src.Gateway)
+
+	if len(src.AccessTokens) > 0 {
+		dst.AccessTokens = make([][]byte, len(src.AccessTokens))
+		for i, tok := range src.AccessTokens {
+			if tok != nil {
+				copied := make([]byte, len(tok))
+				copy(copied, tok)
+				dst.AccessTokens[i] = copied
+			}
+		}
+	} else {
+		dst.AccessTokens = nil
+	}
+
+	if len(src.CryptoAllowAlgorithms) > 0 {
+		dst.CryptoAllowAlgorithms = make([]protocol.ATBUS_CRYPTO_ALGORITHM_TYPE, len(src.CryptoAllowAlgorithms))
+		copy(dst.CryptoAllowAlgorithms, src.CryptoAllowAlgorithms)
+	} else {
+		dst.CryptoAllowAlgorithms = nil
+	}
+
+	if len(src.CompressionAllowAlgorithms) > 0 {
+		dst.CompressionAllowAlgorithms = make([]protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE, len(src.CompressionAllowAlgorithms))
+		copy(dst.CompressionAllowAlgorithms, src.CompressionAllowAlgorithms)
+	} else {
+		dst.CompressionAllowAlgorithms = nil
+	}
 }
 
 type sha256Hash struct {
@@ -145,7 +252,7 @@ func (fg *nodeFlagGuard) openFlag(owner *Node, flag types.NodeFlag) bool {
 	}
 
 	if owner.flags&uint16(flag) != 0 {
-		return false
+		return true
 	}
 
 	if fg.owner != nil {
@@ -168,11 +275,14 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 		n.Reset()
 	}
 
-	// Apply configuration
+	n.initMessageSequenceAllocator()
+	n.eventTimer.upstreamOpRetryInterval = 0
+
+	// Apply configuration (deep copy maps/slices to avoid aliasing caller's config)
 	if conf == nil {
 		types.SetDefaultNodeConfigure(&n.configure)
 	} else {
-		n.configure = *conf
+		cloneNodeConfigure(&n.configure, conf)
 	}
 
 	// Initialize topology
@@ -182,9 +292,8 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 	if n.topologyData == nil {
 		n.topologyData = &types.TopologyData{}
 	}
-	n.topologyData.Pid = int32(os.Getpid())
-	hostname, _ := os.Hostname()
-	n.topologyData.Hostname = hostname
+	n.topologyData.Pid = n.GetSelfPid()
+	n.topologyData.Hostname = n.GetSelfHostname()
 	n.topologyData.Labels = n.configure.TopologyLabels
 
 	if id != 0 {
@@ -217,13 +326,16 @@ func (n *Node) Init(id types.BusIdType, conf *types.NodeConfigure) error_code.Er
 	n.setupIoStreamCallbacks()
 
 	// Create self endpoint
-	n.self = CreateEndpoint(n, id, int64(n.topologyData.Pid), n.topologyData.Hostname)
+	n.self = CreateEndpoint(n, id, int64(n.GetSelfPid()), n.GetSelfHostname())
 	if n.self == nil {
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
+	// 集群隔离配置
+	n.ReloadSelfEndpoint(n.configure.Scope, n.configure.NamespaceName, n.configure.NodeLabels, n.configure.Gateway)
 	n.self.ClearPingTimer()
 	n.eventTimer.pingList = *utils_memory.NewLRUMap[*Endpoint, types.TimerDescPair[*Endpoint]](0)
-	n.eventTimer.connectingList = *utils_memory.NewLRUMap[string, types.TimerDescPair[*Connection]](0)
+	n.eventTimer.connectingListByChannel = make(map[string]*Connection)
+	n.eventTimer.connectingListByPtr = *utils_memory.NewLRUMap[*Connection, types.TimerDescPair[*Connection]](0)
 
 	// Initialize node route collection
 	n.nodeRoute.endpointInstance = make(map[types.BusIdType]*Endpoint)
@@ -240,32 +352,56 @@ func (n *Node) setupIoStreamCallbacks() {
 		return
 	}
 
+	events := make(chan nodeIoStreamEvent, max(1, n.configure.LoopTimes))
+	n.ioStreamEvents = events
+	done := n.ioStreamChannel.GetContext().Done()
 	handles := n.ioStreamChannel.GetEventHandleSet()
-	handles.SetCallback(types.IoStreamCallbackEventType_Connected, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-		n.onIoStreamConnected(conn, status, privData)
-	})
-	handles.SetCallback(types.IoStreamCallbackEventType_Accepted, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-		n.onIoStreamAccepted(conn)
-	})
-	handles.SetCallback(types.IoStreamCallbackEventType_Received, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-		n.onIoStreamReceived(conn, status, privData)
-	})
-	handles.SetCallback(types.IoStreamCallbackEventType_Disconnected, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-		n.onIoStreamDisconnected(conn)
-	})
-	handles.SetCallback(types.IoStreamCallbackEventType_Written, func(channel types.IoStreamChannel, conn types.IoStreamConnection, status int32, privData interface{}) {
-		n.onIoStreamWritten(conn, status, privData)
-	})
+	// The outgoing connection is initialized synchronously by Connection.Connect.
+	handles.SetCallback(types.IoStreamCallbackEventType_Connected, func(types.IoStreamChannel, types.IoStreamConnection, int32, interface{}) {})
+	for _, kind := range [...]types.IoStreamCallbackEventType{
+		types.IoStreamCallbackEventType_Accepted,
+		types.IoStreamCallbackEventType_Received,
+		types.IoStreamCallbackEventType_Disconnected,
+		types.IoStreamCallbackEventType_Written,
+	} {
+		handles.SetCallback(kind, func(_ types.IoStreamChannel, conn types.IoStreamConnection, result int32, privateData interface{}) {
+			payload, _ := privateData.([]byte)
+			event := nodeIoStreamEvent{kind: kind, conn: conn, result: result, size: len(payload)}
+			if kind == types.IoStreamCallbackEventType_Received {
+				// The stream reuses its read buffer after the callback returns.
+				event.data = bytes.Clone(payload)
+			}
+			select {
+			case events <- event:
+			case <-done:
+			}
+		})
+	}
 }
 
-func (n *Node) onIoStreamConnected(ioConn types.IoStreamConnection, status int32, privData interface{}) {
-	// Match C++ connection::iostream_on_connected, which is only a channel-level placeholder.
-	// The actual outbound connection setup is handled in Connection.Connect(), mirroring
-	// C++ connection::iostream_on_connected_cb.
-	_ = n
-	_ = ioConn
-	_ = status
-	_ = privData
+// dispatchIoStreamEvents keeps registration, routing and disconnect callbacks on the node loop.
+func (n *Node) dispatchIoStreamEvents() int32 {
+	before := n.stat.DispatchTimes
+	var processed int32
+	for processed < max(1, n.configure.LoopTimes) && !n.CheckFlag(types.NodeFlag_Shutdown) {
+		select {
+		case event := <-n.ioStreamEvents:
+			switch event.kind {
+			case types.IoStreamCallbackEventType_Accepted:
+				n.onIoStreamAccepted(event.conn)
+			case types.IoStreamCallbackEventType_Received:
+				n.onIoStreamReceived(event.conn, event.result, event.data)
+			case types.IoStreamCallbackEventType_Disconnected:
+				n.onIoStreamDisconnected(event.conn)
+			case types.IoStreamCallbackEventType_Written:
+				n.onIoStreamWritten(event.conn, event.result, event.size)
+			}
+			processed++
+		default:
+			return int32(n.stat.DispatchTimes - before)
+		}
+	}
+	return int32(n.stat.DispatchTimes - before)
 }
 
 func (n *Node) onIoStreamAccepted(ioConn types.IoStreamConnection) {
@@ -277,8 +413,16 @@ func (n *Node) onIoStreamAccepted(ioConn types.IoStreamConnection) {
 		return
 	}
 
-	conn := CreateConnection(n, ioConn.GetAddress().GetAddress())
+	if n.configure.BackLog > 0 && n.GetConnectionTimerSize() >= int(n.configure.BackLog) {
+		n.ioStreamChannel.Disconnect(ioConn)
+		return
+	}
+
+	conn := CreateConnection(n, ioConn.GetAddress().GetAddress(), false)
 	if conn == nil {
+		if n.ioStreamChannel != nil {
+			n.ioStreamChannel.Disconnect(ioConn)
+		}
 		return
 	}
 
@@ -293,7 +437,7 @@ func (n *Node) onIoStreamAccepted(ioConn types.IoStreamConnection) {
 	n.OnNewConnection(conn)
 }
 
-func (n *Node) onIoStreamReceived(ioConn types.IoStreamConnection, status int32, privData interface{}) {
+func (n *Node) onIoStreamReceived(ioConn types.IoStreamConnection, status int32, payload []byte) {
 	if n == nil || ioConn == nil {
 		return
 	}
@@ -303,8 +447,7 @@ func (n *Node) onIoStreamReceived(ioConn types.IoStreamConnection, status int32,
 		return
 	}
 
-	payload, ok := privData.([]byte)
-	if !ok || len(payload) == 0 {
+	if len(payload) == 0 {
 		return
 	}
 
@@ -327,19 +470,17 @@ func (n *Node) onIoStreamDisconnected(ioConn types.IoStreamConnection) {
 		return
 	}
 
+	if streamConn, ok := ioConn.(*io_stream.IoStreamConnection); ok && streamConn.IsPeerClosed() {
+		conn.setFlag(types.ConnectionFlag_PeerClosed, true)
+	}
 	conn.SetIoStreamConnection(nil)
 	conn.setStatus(types.ConnectionState_Disconnected)
 	conn.Reset()
 }
 
-func (n *Node) onIoStreamWritten(ioConn types.IoStreamConnection, status int32, privData interface{}) {
+func (n *Node) onIoStreamWritten(ioConn types.IoStreamConnection, status int32, payloadSize int) {
 	if n == nil || ioConn == nil {
 		return
-	}
-
-	payloadSize := 0
-	if payload, ok := privData.([]byte); ok {
-		payloadSize = len(payload)
 	}
 
 	var conn *Connection
@@ -363,7 +504,7 @@ func (n *Node) onIoStreamWritten(ioConn types.IoStreamConnection, status int32, 
 			conn.statistic.PushFailedSize += uint64(payloadSize)
 		}
 
-		n.LogError(ep, conn, int(status), error_code.ErrorType(status),
+		n.LogError(ep, conn, 0, error_code.ErrorType(status),
 			fmt.Sprintf("write data(%d bytes) to %s failed", payloadSize, connAddr))
 		return
 	}
@@ -417,6 +558,29 @@ func (n *Node) ReloadCompression(compressionAllowAlgorithms []protocol.ATBUS_COM
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
+func (n *Node) ReloadSelfEndpoint(scope string, namespaceName string, labels map[string]string, gateways []types.Gateway) {
+	if n == nil {
+		return
+	}
+
+	n.configure.Scope = scope
+	n.configure.NamespaceName = namespaceName
+	if len(labels) > 0 {
+		copiedLabels := make(map[string]string, len(labels))
+		for k, v := range labels {
+			copiedLabels[k] = v
+		}
+		n.configure.NodeLabels = copiedLabels
+	} else {
+		n.configure.NodeLabels = nil
+	}
+	n.configure.Gateway = types.CloneGateways(gateways)
+
+	if n.self != nil {
+		n.self.Reload(n.configure.Scope, n.configure.NamespaceName, n.configure.NodeLabels, n.configure.Gateway)
+	}
+}
+
 func (n *Node) Start() error_code.ErrorType {
 	return n.StartWithConfigure(nil)
 }
@@ -439,6 +603,7 @@ func (n *Node) StartWithConfigure(conf *types.StartConfigure) error_code.ErrorTy
 	n.initHashCode()
 	if n.self != nil {
 		n.self.UpdateHashCode(n.getHashCode())
+		n.self.Reload(n.configure.Scope, n.configure.NamespaceName, n.configure.NodeLabels, n.configure.Gateway)
 	}
 
 	// 连接上游节点
@@ -446,10 +611,13 @@ func (n *Node) StartWithConfigure(conf *types.StartConfigure) error_code.ErrorTy
 		if n.upstream.node == nil {
 			// 如果上游节点被激活了，那么上游节点操作时间必须更新到非0值，以启用这个功能
 			if n.Connect(n.configure.UpstreamAddress) == error_code.EN_ATBUS_ERR_SUCCESS {
+				// first_idle_timeout 是连接和握手的确认时限，不影响重试退避间隔
 				n.eventTimer.upstreamOpTimepoint = n.eventTimer.tick.Add(n.configure.FirstIdleTimeout)
 				n.setState(types.NodeState_ConnectingUpstream)
 			} else {
-				n.eventTimer.upstreamOpTimepoint = n.eventTimer.tick.Add(n.configure.RetryInterval)
+				// 首次失败占用一级退避间隔
+				n.eventTimer.upstreamOpRetryInterval = n.configure.RetryInterval
+				n.eventTimer.upstreamOpTimepoint = n.eventTimer.tick.Add(n.eventTimer.upstreamOpRetryInterval)
 				n.setState(types.NodeState_LostUpstream)
 			}
 		}
@@ -473,8 +641,9 @@ func (n *Node) Reset() error_code.ErrorType {
 	defer fgd.closeFlag()
 
 	// Reset upstream endpoint
-	if n.upstream.node != nil {
-		n.RemoveEndpoint(n.upstream.node)
+	if upstream := n.upstream.node; upstream != nil {
+		n.RemoveEndpoint(upstream)
+		upstream.Reset()
 	}
 
 	// Remove all route endpoints
@@ -482,14 +651,24 @@ func (n *Node) Reset() error_code.ErrorType {
 
 	// Clear connecting list
 	for {
-		_, conn, exists := n.eventTimer.connectingList.PopFront()
+		n.eventTimer.connectingListMu.Lock()
+		key, pair, exists := n.eventTimer.connectingListByPtr.Front()
 		if !exists {
+			n.eventTimer.connectingListMu.Unlock()
 			break
 		}
-		if conn.Value != nil {
-			conn.Value.Reset()
+		if pair.Value == nil {
+			n.eventTimer.connectingListByPtr.Delete(key)
+			n.eventTimer.connectingListMu.Unlock()
+			continue
 		}
+		conn := pair.Value
+		n.eventTimer.connectingListMu.Unlock()
+		n.removeConnectionTimer(conn, true)
 	}
+	n.eventTimer.connectingListMu.Lock()
+	clear(n.eventTimer.connectingListByChannel)
+	n.eventTimer.connectingListMu.Unlock()
 
 	// Reset self endpoint
 	if n.self != nil {
@@ -500,6 +679,8 @@ func (n *Node) Reset() error_code.ErrorType {
 	n.flags |= uint16(types.NodeFlag_ResettingGc)
 	n.eventTimer.pendingEndpointGcList.Init()
 	n.eventTimer.pendingConnectionGcList.Init()
+	n.eventTimer.upstreamOpTimepoint = time.Time{}
+	n.eventTimer.upstreamOpRetryInterval = 0
 
 	n.eventTimer.pingListMu.Lock()
 	for {
@@ -510,20 +691,20 @@ func (n *Node) Reset() error_code.ErrorType {
 	}
 	n.eventTimer.pingListMu.Unlock()
 
-	// Close IO stream channel
-	if n.ioStreamChannel != nil {
-		n.ioStreamChannel.Close()
-		n.ioStreamChannel = nil
-	}
-
-	// Clear self-message queues
-	n.selfDataMessages.Init()
-	n.selfCommandMessages.Init()
-
 	if n.eventCancelFn != nil {
 		n.eventCancelFn()
 		n.eventCancelFn = nil
 	}
+	// Close the IO channel after releasing any producers waiting to enqueue.
+	if n.ioStreamChannel != nil {
+		n.ioStreamChannel.Close()
+		n.ioStreamChannel = nil
+	}
+	n.ioStreamEvents = nil
+
+	// Clear self-message queues
+	n.selfDataMessages.Init()
+	n.selfCommandMessages.Init()
 
 	// Reset state
 	n.setState(types.NodeState_Created)
@@ -562,6 +743,10 @@ func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 		return ret, error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
+	ret += n.dispatchIoStreamEvents()
+	if n.state == types.NodeState_Created {
+		return ret, error_code.EN_ATBUS_ERR_SUCCESS
+	}
 	// Process connection timeouts
 	n.processConnectingTimeout(now)
 
@@ -583,49 +768,38 @@ func (n *Node) Proc(now time.Time) (int32, error_code.ErrorType) {
 // processConnectingTimeout handles timeout for connections that are still connecting
 func (n *Node) processConnectingTimeout(now time.Time) {
 	for {
-		connAddr, pair, exists := n.eventTimer.connectingList.Front()
+		n.eventTimer.connectingListMu.Lock()
+		key, pair, exists := n.eventTimer.connectingListByPtr.Front()
 		if !exists {
+			n.eventTimer.connectingListMu.Unlock()
 			break
 		}
 
 		if pair.Value == nil {
-			n.eventTimer.connectingList.PopFront()
+			n.eventTimer.connectingListByPtr.Delete(key)
+			n.eventTimer.connectingListMu.Unlock()
 			continue
 		}
 
-		if pair.Value.IsConnected() {
-			pair.Value.RemoveOwnerChecker()
-			n.eventTimer.connectingList.PopFront()
+		conn := pair.Value
+		timeout := pair.Timeout
+		n.eventTimer.connectingListMu.Unlock()
+
+		if conn.IsConnected() {
+			n.removeConnectionTimer(conn, false)
 			continue
 		}
 
-		if !pair.Timeout.Before(now) {
+		if !timeout.Before(now) {
 			break
 		}
 
 		// Connection timeout
-		if !pair.Value.CheckFlag(types.ConnectionFlag_Temporary) {
-			n.LogError(nil, pair.Value, int(error_code.EN_ATBUS_ERR_NODE_TIMEOUT), 0,
-				fmt.Sprintf("connection %s timeout", pair.Value.GetAddress().GetAddress()))
+		if !conn.CheckFlag(types.ConnectionFlag_Temporary) {
+			n.LogError(nil, conn, 0, error_code.EN_ATBUS_ERR_NODE_TIMEOUT,
+				fmt.Sprintf("connection %s timeout", conn.GetAddress().GetAddress()))
 		}
-		conn := pair.Value
-		conn.Reset()
-
-		// Match C++ node::proc timeout cleanup: Reset() may already remove the
-		// front entry and notify through removeConnectionTimer(). Only fire an
-		// extra callback when the timed-out entry is still the current front.
-		nextAddr, nextPair, stillFront := n.eventTimer.connectingList.Front()
-		if stillFront && nextAddr == connAddr && nextPair.Value == conn {
-			handle := n.eventHandleset.OnInvalidConnection
-			if handle != nil {
-				fgd := &nodeFlagGuard{}
-				fgd.openFlag(n, types.NodeFlag_InCallback)
-				handle(n, conn, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
-				fgd.closeFlag()
-			}
-
-			n.eventTimer.connectingList.PopFront()
-		}
+		n.removeConnectionTimer(conn, true)
 	}
 }
 
@@ -649,10 +823,14 @@ func (n *Node) processUpstreamOperations(now time.Time) {
 	if ctrlConn == nil {
 		res := n.Connect(n.configure.UpstreamAddress)
 		if res != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(nil, nil, int(res), 0,
+			n.LogError(nil, nil, 0, res,
 				fmt.Sprintf("reconnect upstream node %s failed", n.configure.UpstreamAddress))
-			n.eventTimer.upstreamOpTimepoint = now.Add(n.configure.RetryInterval)
+			n.eventTimer.upstreamOpRetryInterval = nextUpstreamOpRetryInterval(
+				&n.configure, n.eventTimer.upstreamOpRetryInterval, n.CheckFlag(types.NodeFlag_Actived))
+			n.eventTimer.upstreamOpTimepoint = now.Add(n.eventTimer.upstreamOpRetryInterval)
 		} else {
+			// 下一次判定上游节点连接超时再重新连接
+			// first_idle_timeout 是连接和握手的确认时限，不影响重试退避间隔
 			n.eventTimer.upstreamOpTimepoint = now.Add(n.configure.FirstIdleTimeout)
 			n.setState(types.NodeState_ConnectingUpstream)
 		}
@@ -664,8 +842,15 @@ func (n *Node) processUpstreamOperations(now time.Time) {
 				n.AddEndpointGcList(n.upstream.node)
 			}
 		} else if n.upstream.node != nil {
-			n.pingEndpoint(n.upstream.node)
+			res := n.pingEndpoint(n.upstream.node)
+			if res != error_code.EN_ATBUS_ERR_SUCCESS {
+				n.LogError(nil, nil, 0, res,
+					fmt.Sprintf("ping upstream node %s failed", n.configure.UpstreamAddress))
+			}
 		}
+
+		// ping包不需要重试
+		n.eventTimer.upstreamOpTimepoint = now.Add(n.configure.PingInterval)
 	}
 }
 
@@ -694,8 +879,21 @@ func (n *Node) processPingTimers(now time.Time) {
 		n.eventTimer.pingList.PopFront()
 		n.eventTimer.pingListMu.Unlock()
 
-		// Send ping
-		n.pingEndpoint(ep)
+		// Ping前检测有效性，超出最大首次空闲时间后还处于不可用状态（没有数据连接）需要回收
+		if !ep.IsAvailable() && ep.GetStatisticCreatedTime().Add(n.configure.FirstIdleTimeout).Before(now) {
+			n.AddEndpointGcList(ep)
+			ep.AddPingTimer()
+			continue
+		}
+
+		// 上游节点使用 processUpstreamOperations 定时 ping
+		if ep != n.upstream.node {
+			n.pingEndpoint(ep)
+		}
+
+		if n.GetEndpoint(ep.GetId()) == ep {
+			ep.AddPingTimer()
+		}
 	}
 }
 
@@ -728,6 +926,7 @@ func (n *Node) executeGC() {
 
 		for _, ep := range checked {
 			if !ep.IsAvailable() {
+				ep.Reset()
 				n.LogInfo(ep, nil, "endpoint gc and remove")
 				n.RemoveEndpoint(ep)
 			}
@@ -745,6 +944,7 @@ func (n *Node) executeGC() {
 		fgGc.openFlag(n, types.NodeFlag_InGcConnections)
 
 		n.eventTimer.pendingConnectionGcList.Init()
+		fgGc.closeFlag()
 	}
 }
 
@@ -778,7 +978,7 @@ func (n *Node) dispatchAllSelfMessages() int32 {
 		head := m.GetHead()
 		bodyType := m.GetBodyType()
 		if head == nil || bodyType == types.MessageBodyTypeUnknown {
-			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+			n.LogError(n.GetSelfEndpoint(), nil, 0, error_code.EN_ATBUS_ERR_UNPACK,
 				"head or body type unset")
 			continue
 		}
@@ -818,7 +1018,7 @@ func (n *Node) dispatchAllSelfMessages() int32 {
 		head := m.GetHead()
 		bodyType := m.GetBodyType()
 		if head == nil || bodyType == types.MessageBodyTypeUnknown {
-			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+			n.LogError(n.GetSelfEndpoint(), nil, 0, error_code.EN_ATBUS_ERR_UNPACK,
 				"head or body type unset")
 			continue
 		}
@@ -836,35 +1036,48 @@ func (n *Node) pingEndpoint(ep *Endpoint) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
+	// 检测上一次ping是否返回
+	if ep.GetStatisticUnfinishedPing() != 0 {
+		if n.addEndpointFault(ep, nil) {
+			return error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT
+		}
+	}
+
 	if n.self == nil {
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
-	// Get control connection for ping
+	// 临时节点不需要对外发送ping包
+	if n.GetId() == 0 {
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	// 允许跳过未连接或握手完成的endpoint
 	conn := n.self.GetCtrlConnection(ep)
 	if lu.IsNil(conn) {
-		return error_code.EN_ATBUS_ERR_ATNODE_NO_CONNECTION
+		n.addEndpointFault(ep, nil)
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	// Send ping message
-	ret := message_handle.SendPing(n, conn, n.AllocateMessageSequence())
+	// 在发送前记录未完成ping序列号，避免Go异步IO协程在SendPing返回前就收到pong并比对序列号
+	pingSeq := n.AllocateMessageSequence()
+	ep.SetStatisticUnfinishedPing(pingSeq)
+
+	// 出错则增加错误计数
+	ret := message_handle.SendPing(n, conn, pingSeq)
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-		n.LogError(ep, conn, int(ret), ret, "send ping message failed")
+		ep.SetStatisticUnfinishedPing(0)
+		n.LogError(ep, conn, 0, ret, "send ping message failed")
+		n.addEndpointFault(ep, nil)
+		return ret
 	}
 
-	// Fire callback
-	handle := n.eventHandleset.OnEndpointPing
-	if handle != nil {
-		fgd := &nodeFlagGuard{}
-		fgd.openFlag(n, types.NodeFlag_InCallback)
-		handle(n, ep, nil, nil)
-		fgd.closeFlag()
+	// no data channel is also an error
+	if lu.IsNil(n.self.GetDataConnection(ep, false)) {
+		n.addEndpointFault(ep, nil)
 	}
 
-	// Add ping timer for next ping
-	ep.AddPingTimer()
-
-	return ret
+	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func (n *Node) Poll() (int32, error_code.ErrorType) {
@@ -879,7 +1092,9 @@ func (n *Node) Poll() (int32, error_code.ErrorType) {
 	eventCount := int32(0)
 
 	var fg nodeFlagGuard
-	fg.openFlag(n, types.NodeFlag_InCallback)
+	if fg.openFlag(n, types.NodeFlag_InPoll) {
+		return 0, error_code.EN_ATBUS_ERR_SUCCESS
+	}
 	defer fg.closeFlag()
 
 	if n.CheckFlag(types.NodeFlag_Shutdown) {
@@ -888,7 +1103,7 @@ func (n *Node) Poll() (int32, error_code.ErrorType) {
 		return eventCount, error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	// golang版本无法在主协程里收束 ioStreamChannel 的事件循环，所以忽略这部分控制
+	eventCount += n.dispatchIoStreamEvents()
 
 	// dispatcher all self messages
 	eventCount += n.dispatchAllSelfMessages()
@@ -918,7 +1133,7 @@ func (n *Node) Listen(address string) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
-	conn := CreateConnection(n, address)
+	conn := CreateConnection(n, address, true)
 	if conn == nil {
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
@@ -950,14 +1165,11 @@ func (n *Node) Connect(address string) error_code.ErrorType {
 		return error_code.EN_ATBUS_ERR_NOT_INITED
 	}
 
-	connPair, exists := n.eventTimer.connectingList.Get(address, false)
-	if exists {
-		if connPair.Value != nil && !connPair.Value.IsConnected() {
-			return error_code.EN_ATBUS_ERR_SUCCESS
-		}
+	if existingConn := n.getPendingConnection(address); existingConn != nil && !existingConn.IsConnected() {
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	conn := CreateConnection(n, address)
+	conn := CreateConnection(n, address, false)
 	if conn == nil {
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
@@ -987,31 +1199,24 @@ func (n *Node) ConnectWithEndpoint(address string, ep types.Endpoint) error_code
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	connPair, exists := n.eventTimer.connectingList.Get(address, false)
-	if exists {
-		if connPair.Value != nil && !connPair.Value.IsConnected() {
-			return error_code.EN_ATBUS_ERR_SUCCESS
-		}
+	if existingConn := n.getPendingConnection(address); existingConn != nil &&
+		!existingConn.IsConnected() && existingConn.GetBinding() == ep {
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	conn := CreateConnection(n, address)
+	conn := CreateConnection(n, address, false)
 	if conn == nil {
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
 
-	ret := conn.Connect()
+	ret := conn.connect(ep)
 	if ret != error_code.EN_ATBUS_ERR_SUCCESS {
 		return ret
 	}
 
 	n.LogDebug(nil, conn, nil, fmt.Sprintf("connect to %s and bind to a endpoint %d success", address, ep.GetId()))
 
-	// golang实现暂未支持共享内存通道和内存通道,所以添加的总是不强制数据连接
-	if ep.AddConnection(conn, false) {
-		return error_code.EN_ATBUS_ERR_SUCCESS
-	}
-
-	return error_code.EN_ATBUS_ERR_BAD_DATA
+	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
 func (n *Node) Disconnect(id types.BusIdType) error_code.ErrorType {
@@ -1074,7 +1279,7 @@ func (n *Node) SendDataWithOptions(tid types.BusIdType, t int32, data []byte, op
 	head := m.MutableHead()
 	body := m.MutableBody().MutableDataTransformReq()
 	if head == nil || body == nil {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_MALLOC), error_code.EN_ATBUS_ERR_MALLOC, "create message failed")
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_MALLOC, "create message failed")
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
 
@@ -1132,7 +1337,7 @@ func (n *Node) SendCustomCommandWithOptions(tid types.BusIdType, args [][]byte, 
 	head := m.MutableHead()
 	body := m.MutableBody().MutableCustomCommandReq()
 	if head == nil || body == nil {
-		n.LogError(nil, nil, int(error_code.EN_ATBUS_ERR_MALLOC), error_code.EN_ATBUS_ERR_MALLOC, "create message failed")
+		n.LogError(nil, nil, 0, error_code.EN_ATBUS_ERR_MALLOC, "create message failed")
 		return error_code.EN_ATBUS_ERR_MALLOC
 	}
 
@@ -1474,6 +1679,7 @@ func (n *Node) RemoveEndpoint(ep types.Endpoint) error_code.ErrorType {
 
 		ep := n.upstream.node
 		n.upstream.node = nil
+		ep.ClearPingTimer()
 
 		if n.GetState() == types.NodeState_Running || n.GetState() == types.NodeState_ConnectingUpstream {
 			n.setState(types.NodeState_LostUpstream)
@@ -1481,7 +1687,9 @@ func (n *Node) RemoveEndpoint(ep types.Endpoint) error_code.ErrorType {
 			// Immediately try to reconnect upstream when first lost upstream
 			n.eventTimer.upstreamOpTimepoint = n.GetTimerTick()
 		} else {
-			n.eventTimer.upstreamOpTimepoint = n.GetTimerTick().Add(n.configure.RetryInterval)
+			n.eventTimer.upstreamOpRetryInterval = nextUpstreamOpRetryInterval(
+				&n.configure, n.eventTimer.upstreamOpRetryInterval, n.CheckFlag(types.NodeFlag_Actived))
+			n.eventTimer.upstreamOpTimepoint = n.GetTimerTick().Add(n.eventTimer.upstreamOpRetryInterval)
 		}
 
 		// event
@@ -1565,7 +1773,7 @@ func (n *Node) CheckAccessHash(accessKey *protocol.AccessData, plainText string,
 	}
 
 	if accessKey.GetAlgorithm() != protocol.ATBUS_ACCESS_DATA_ALGORITHM_TYPE_ATBUS_ACCESS_DATA_ALGORITHM_HMAC_SHA256 {
-		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ALGORITHM_NOT_SUPPORT), error_code.EN_ATBUS_ERR_ALGORITHM_NOT_SUPPORT,
+		n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ALGORITHM_NOT_SUPPORT,
 			fmt.Sprintf("access hash algorithm %v not supported", accessKey.GetAlgorithm()))
 		return false
 	}
@@ -1575,13 +1783,13 @@ func (n *Node) CheckAccessHash(accessKey *protocol.AccessData, plainText string,
 	}
 
 	if len(n.configure.AccessTokens) == 0 {
-		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ACCESS_DENY), error_code.EN_ATBUS_ERR_ACCESS_DENY,
+		n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ACCESS_DENY,
 			"access hash configuration is empty; we do not allow handshaking an endpoint with a signature.")
 		return false
 	}
 
 	if len(accessKey.GetSignature()) == 0 {
-		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ACCESS_DENY), error_code.EN_ATBUS_ERR_ACCESS_DENY,
+		n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ACCESS_DENY,
 			"access hash configuration is not empty; signature is required.")
 		return false
 	}
@@ -1705,7 +1913,7 @@ func (n *Node) GetImmediateEndpointSet() types.EndpointCollectionType {
 
 func (n *Node) SendDataMessage(tid types.BusIdType, message *types.Message, options *types.NodeSendDataOptions) (error_code.ErrorType, types.Endpoint, types.Connection) {
 	return n.sendMessage(tid, message, func(from types.Endpoint, to types.Endpoint) types.Connection {
-		return from.GetDataConnection(to, false)
+		return from.GetDataConnection(to, true)
 	}, options)
 }
 
@@ -1730,7 +1938,7 @@ func (n *Node) sendMessage(tid types.BusIdType, message *types.Message, fn func(
 		bodyType := message.GetBodyType()
 
 		if head == nil || bodyType == types.MessageBodyTypeUnknown {
-			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+			n.LogError(n.GetSelfEndpoint(), nil, 0, error_code.EN_ATBUS_ERR_UNPACK,
 				"head or body type unset")
 			return error_code.EN_ATBUS_ERR_UNPACK, nil, nil
 		}
@@ -1744,7 +1952,7 @@ func (n *Node) sendMessage(tid types.BusIdType, message *types.Message, fn func(
 			bodyType != types.MessageBodyTypeDataTransformRsp &&
 			bodyType != types.MessageBodyTypeCustomCommandReq &&
 			bodyType != types.MessageBodyTypeCustomCommandRsp {
-			n.LogError(n.GetSelfEndpoint(), nil, int(error_code.EN_ATBUS_ERR_ATNODE_INVALID_MSG), 0,
+			n.LogError(n.GetSelfEndpoint(), nil, 0, error_code.EN_ATBUS_ERR_ATNODE_INVALID_MSG,
 				fmt.Sprintf("invalid body type %d", int(bodyType)))
 			return error_code.EN_ATBUS_ERR_ATNODE_INVALID_MSG, nil, nil
 		}
@@ -1779,7 +1987,7 @@ func (n *Node) sendMessage(tid types.BusIdType, message *types.Message, fn func(
 	head := message.GetHead()
 	bodyType := message.GetBodyType()
 	if head == nil || bodyType == types.MessageBodyTypeUnknown {
-		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_UNPACK), error_code.EN_ATBUS_ERR_UNPACK,
+		n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_UNPACK,
 			"head or body type unset")
 		return error_code.EN_ATBUS_ERR_UNPACK, ep, conn
 	}
@@ -1828,11 +2036,14 @@ func (n *Node) OnDisconnect(ep types.Endpoint, conn types.Connection) error_code
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	if n.state == types.NodeState_ConnectingUpstream && n.configure.UpstreamAddress != "" && n.configure.UpstreamAddress == conn.GetAddress().GetAddress() {
+	if n.state == types.NodeState_ConnectingUpstream && n.configure.UpstreamAddress != "" &&
+		(n.configure.UpstreamAddress == conn.GetAddress().GetAddress() || n.configure.UpstreamAddress == conn.GetOriginAddress()) {
 		n.setState(types.NodeState_LostUpstream)
 
 		// set reconnect to upstream into retry interval
-		n.eventTimer.upstreamOpTimepoint = n.GetTimerTick().Add(n.configure.RetryInterval)
+		n.eventTimer.upstreamOpRetryInterval = nextUpstreamOpRetryInterval(
+			&n.configure, n.eventTimer.upstreamOpRetryInterval, n.CheckFlag(types.NodeFlag_Actived))
+		n.eventTimer.upstreamOpTimepoint = n.GetTimerTick().Add(n.eventTimer.upstreamOpRetryInterval)
 
 		// if not activited, shutdown
 		if !n.CheckFlag(types.NodeFlag_Actived) {
@@ -1876,7 +2087,7 @@ func (n *Node) OnNewConnection(conn types.Connection) error_code.ErrorType {
 		ret = message_handle.SendRegister(types.MessageBodyTypeNodeRegisterReq, n, conn,
 			error_code.EN_ATBUS_ERR_SUCCESS, n.AllocateMessageSequence())
 		if ret != error_code.EN_ATBUS_ERR_SUCCESS {
-			n.LogError(nil, conn, int(ret), ret,
+			n.LogError(nil, conn, 0, ret,
 				fmt.Sprintf("send node register message to %s failed", conn.GetAddress().GetAddress()))
 			conn.Reset()
 		}
@@ -1905,6 +2116,10 @@ func (n *Node) OnActived() {
 	}
 
 	n.setState(types.NodeState_Running)
+
+	// 每次激活成功（包括断线重连后的再次激活）都要重置重试退避间隔
+	n.eventTimer.upstreamOpRetryInterval = 0
+
 	if n.CheckFlag(types.NodeFlag_Actived) {
 		return
 	}
@@ -2027,7 +2242,7 @@ func (n *Node) addEndpointFault(ep types.Endpoint, conn types.Connection) bool {
 
 	faultCount := ep.AddStatisticFault()
 	if faultCount >= uint64(n.configure.FaultTolerant) {
-		n.LogError(ep, conn, int(error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT), error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
+		n.LogError(ep, conn, 0, error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
 			fmt.Sprintf("endpoint %d fault count %d exceeds threshold", ep.GetId(), faultCount))
 		n.RemoveEndpoint(ep)
 		return true
@@ -2043,8 +2258,8 @@ func (n *Node) addConnectionFault(conn types.Connection) bool {
 
 	faultCount := conn.AddStatisticFault()
 	if faultCount >= uint64(n.configure.FaultTolerant) {
-		n.LogError(conn.GetBinding(), conn, int(error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT), error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
-			fmt.Sprintf("connection %d fault count %d exceeds threshold", conn.GetBinding().GetId(), faultCount))
+		n.LogError(conn.GetBinding(), conn, 0, error_code.EN_ATBUS_ERR_ATNODE_FAULT_TOLERANT,
+			fmt.Sprintf("connection fault count %d reaches threshold", faultCount))
 		conn.Reset()
 		return true
 	}
@@ -2056,15 +2271,24 @@ func (n *Node) addConnectionFault(conn types.Connection) bool {
 // Matches C++ node::on_receive_message.
 func (n *Node) onReceiveMessage(conn types.Connection, m *types.Message, status int, errcode error_code.ErrorType) {
 	if int32(status) < 0 || int32(errcode) < 0 {
-		n.addEndpointFault(conn.GetBinding(), conn)
-		n.addConnectionFault(conn)
+		connAddr := ""
+		if !lu.IsNil(conn) && conn.GetAddress() != nil {
+			connAddr = conn.GetAddress().GetAddress()
+		}
+		n.LogError(nil, conn, status, errcode, fmt.Sprintf("receive message from %s failed", connAddr))
+		if !lu.IsNil(conn) {
+			n.addEndpointFault(conn.GetBinding(), conn)
+			n.addConnectionFault(conn)
+		}
 		return
 	}
 
 	res := message_handle.DispatchMessage(n, conn, m, status, errcode)
 	if int32(res) < 0 {
-		n.addEndpointFault(conn.GetBinding(), conn)
-		n.addConnectionFault(conn)
+		if !lu.IsNil(conn) {
+			n.addEndpointFault(conn.GetBinding(), conn)
+			n.addConnectionFault(conn)
+		}
 		return
 	}
 
@@ -2113,7 +2337,7 @@ func (n *Node) FatalShutdown(ep types.Endpoint, conn types.Connection, code erro
 	}
 	n.Shutdown(code)
 
-	n.LogError(ep, conn, int(code), code, fmt.Sprintf("fatal shutdown error %v", err))
+	n.LogError(ep, conn, 0, code, fmt.Sprintf("fatal shutdown error %v", err))
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
 
@@ -2567,94 +2791,94 @@ func (n *Node) GetPid() int {
 	return os.Getpid()
 }
 
-var hostName string
+var (
+	hostName   string
+	hostNameMu sync.Mutex
+)
+
+func activeInterfaceMACs() []string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	addresses := make([]string, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if iface.Flags&(net.FlagUp|net.FlagLoopback) != net.FlagUp || len(iface.HardwareAddr) != 6 {
+			continue
+		}
+		unicast, err := iface.Addrs()
+		if err != nil || len(unicast) == 0 {
+			continue
+		}
+		mac := bytes.TrimLeft(iface.HardwareAddr, "\x00")
+		if len(mac) > 0 {
+			addresses = append(addresses, hex.EncodeToString(mac))
+		}
+	}
+	slices.Sort(addresses)
+	return slices.Compact(addresses)
+}
 
 func buildHostname() string {
-	interfaces, err := net.Interfaces()
-	if err == nil {
-		allInterfaces := make([]string, 0, len(interfaces))
-		totalSize := 0
-		for _, iface := range interfaces {
-			if iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-
-			mac := iface.HardwareAddr
-			if len(mac) == 0 {
-				continue
-			}
-
-			idx := 0
-			for idx < len(mac) && mac[idx] == 0 {
-				idx++
-			}
-			if idx >= len(mac) {
-				continue
-			}
-
-			hexAddr := hex.EncodeToString(mac[idx:])
-			if hexAddr == "" {
-				continue
-			}
-
-			allInterfaces = append(allInterfaces, hexAddr)
-			totalSize += len(hexAddr)
-		}
-
-		if len(allInterfaces) > 0 {
-			sort.Strings(allInterfaces)
-			uniq := allInterfaces[:0]
-			for _, addr := range allInterfaces {
-				if len(uniq) == 0 || uniq[len(uniq)-1] != addr {
-					uniq = append(uniq, addr)
-				}
-			}
-
-			if len(uniq) > 0 {
-				var builder strings.Builder
-				builder.Grow(totalSize + len(uniq) - 1)
-				for i, addr := range uniq {
-					if i > 0 {
-						builder.WriteByte(':')
-					}
-					builder.WriteString(addr)
-				}
-
-				if builder.Len() > 0 {
-					return sha256String(builder.String()).hex()
-				}
-			}
-		}
+	if macs := activeInterfaceMACs(); len(macs) > 0 {
+		return sha256String(strings.Join(macs, ":")).hex()
 	}
-
-	host, err := os.Hostname()
-	if err == nil {
-		return host
-	}
-
+	host, _ := os.Hostname()
 	if host != "" {
-		host = sha256String(host).hex()
+		return sha256String(host).hex()
 	}
-
 	return ""
 }
 
 func (n *Node) GetHostname() string {
-	if hostName != "" {
-		return hostName
+	hostNameMu.Lock()
+	defer hostNameMu.Unlock()
+	if hostName == "" {
+		hostName = buildHostname()
 	}
-
-	hostName = buildHostname()
 	return hostName
 }
 
 func (n *Node) SetHostname(hostname string, force bool) bool {
+	hostNameMu.Lock()
+	defer hostNameMu.Unlock()
 	if hostName == "" || force {
 		hostName = hostname
 		return true
 	}
-
 	return false
+}
+
+func (n *Node) GetSelfHostname() string {
+	if n != nil && n.selfHostname != "" {
+		return n.selfHostname
+	}
+
+	return n.GetHostname()
+}
+
+func (n *Node) SetSelfHostname(hostname string) {
+	if n == nil {
+		return
+	}
+
+	n.selfHostname = hostname
+}
+
+func (n *Node) GetSelfPid() int32 {
+	if n != nil && n.selfPid != 0 {
+		return n.selfPid
+	}
+
+	return int32(n.GetPid())
+}
+
+func (n *Node) SetSelfPid(pid int32) {
+	if n == nil {
+		return
+	}
+
+	n.selfPid = pid
 }
 
 func (n *Node) GetProtocolVersion() int32 {
@@ -2683,6 +2907,39 @@ func (n *Node) GetListenList() []types.ChannelAddress {
 	}
 
 	return n.self.GetListenAddress()
+}
+
+func (n *Node) GetGatewayAddress() []types.Gateway {
+	if n == nil {
+		return nil
+	}
+
+	return types.CloneGateways(n.configure.Gateway)
+}
+
+func (n *Node) DumpListenToChannelData(listenAddress string, ch *protocol.ChannelData) {
+	if n == nil || ch == nil {
+		return
+	}
+
+	ch.Address = listenAddress
+	// 默认监听地址要隔离scope和namespace
+	ch.MatchScope = n.configure.Scope
+	if n.configure.NamespaceName != "" {
+		ch.MatchNamespaces = []string{n.configure.NamespaceName}
+	} else {
+		ch.MatchNamespaces = nil
+	}
+}
+
+func (n *Node) GetConnectionTimerSize() int {
+	if n == nil {
+		return 0
+	}
+
+	n.eventTimer.connectingListMu.Lock()
+	defer n.eventTimer.connectingListMu.Unlock()
+	return n.eventTimer.connectingListByPtr.Len()
 }
 
 func (n *Node) AddStatisticDispatchTimes() {
@@ -2759,6 +3016,7 @@ func (n *Node) removeChild(col *endpointCollection, tid types.BusIdType, expecte
 
 	delete(col.endpointInstance, tid)
 	delete(col.endpointInterface, tid)
+	ep.ClearPingTimer()
 
 	if !ignoreEvent && n != nil {
 		handle := n.GetEventHandleOnRemoveEndpoint()
@@ -2779,15 +3037,15 @@ func (n *Node) removeRouteCollection(col *endpointCollection) {
 		return
 	}
 
-	// Copy ids to avoid modification during iteration
-	ids := make([]types.BusIdType, 0, len(col.endpointInstance))
-	for id := range col.endpointInstance {
-		ids = append(ids, id)
+	// Callbacks can modify the collection while endpoints are detached.
+	endpoints := make([]*Endpoint, 0, len(col.endpointInstance))
+	for _, ep := range col.endpointInstance {
+		endpoints = append(endpoints, ep)
 	}
 
-	// Remove all endpoints
-	for _, id := range ids {
-		n.removeChild(col, id, nil, false)
+	for _, ep := range endpoints {
+		n.removeChild(col, ep.GetId(), ep, false)
+		ep.Reset()
 	}
 }
 
@@ -2799,53 +3057,15 @@ func (n *Node) initHashCode() {
 	h := sha256.New()
 
 	// hash all interface mac addresses (sorted, unique)
-	interfaces, err := net.Interfaces()
-	if err == nil {
-		allInterfaces := make([]string, 0, len(interfaces))
-		for _, iface := range interfaces {
-			if iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-
-			mac := iface.HardwareAddr
-			if len(mac) == 0 {
-				continue
-			}
-
-			idx := 0
-			for idx < len(mac) && mac[idx] == 0 {
-				idx++
-			}
-			if idx >= len(mac) {
-				continue
-			}
-
-			hexAddr := hex.EncodeToString(mac[idx:])
-			if hexAddr == "" {
-				continue
-			}
-
-			allInterfaces = append(allInterfaces, hexAddr)
-		}
-
-		if len(allInterfaces) > 0 {
-			sort.Strings(allInterfaces)
-			last := ""
-			for _, addr := range allInterfaces {
-				if addr == last {
-					continue
-				}
-				last = addr
-				_, _ = h.Write([]byte(addr))
-			}
-		}
+	for _, mac := range activeInterfaceMACs() {
+		_, _ = h.Write([]byte(mac))
 	}
 
 	// hash hostname
-	_, _ = h.Write([]byte(n.GetHostname()))
+	_, _ = h.Write([]byte(n.GetSelfHostname()))
 
 	// hash pid (int32 to match C++ int size)
-	pid := int32(n.GetPid())
+	pid := n.GetSelfPid()
 	var pidBuf [4]byte
 	binary.LittleEndian.PutUint32(pidBuf[:], uint32(pid))
 	_, _ = h.Write(pidBuf[:])
@@ -2879,36 +3099,89 @@ func (n *Node) getHashCode() string {
 	return n.hashCode
 }
 
-func (n *Node) removeConnectionTimer(conn *Connection) {
+func (n *Node) addConnectionTimer(conn *Connection) bool {
 	if n == nil || conn == nil {
-		return
+		return false
 	}
 
-	findConn, exists := n.eventTimer.connectingList.Get(conn.GetAddress().GetAddress(), false)
-	if !exists {
-		return
+	if n.state == types.NodeState_Created {
+		return false
 	}
 
-	if findConn.Value == nil {
-		n.eventTimer.connectingList.Delete(conn.GetAddress().GetAddress())
-		return
+	if !conn.IsConnected() {
+		n.eventTimer.connectingListMu.Lock()
+		if n.eventTimer.connectingListByChannel == nil {
+			n.eventTimer.connectingListByChannel = make(map[string]*Connection)
+		}
+		if _, exists := n.eventTimer.connectingListByPtr.Get(conn, false); exists {
+			n.eventTimer.connectingListMu.Unlock()
+			return false
+		}
+
+		timeout := n.eventTimer.tick.Add(n.configure.FirstIdleTimeout)
+		n.eventTimer.connectingListByPtr.Put(conn, types.TimerDescPair[*Connection]{
+			Timeout: timeout,
+			Value:   conn,
+		})
+		if addr := conn.GetAddress(); addr != nil {
+			n.eventTimer.connectingListByChannel[addr.GetAddress()] = conn
+		}
+		n.eventTimer.connectingListMu.Unlock()
 	}
 
-	if findConn.Value != conn {
-		return
+	return true
+}
+
+func (n *Node) getPendingConnection(address string) *Connection {
+	normalized, ok := makeConnectionAddress(address, false)
+	if !ok {
+		return nil
+	}
+	n.eventTimer.connectingListMu.Lock()
+	defer n.eventTimer.connectingListMu.Unlock()
+	return n.eventTimer.connectingListByChannel[normalized.GetAddress()]
+}
+
+func (n *Node) removeConnectionTimer(conn *Connection, reset bool) bool {
+	if n == nil || conn == nil {
+		return false
 	}
 
-	if n.eventHandleset.OnInvalidConnection != nil && !findConn.Value.IsConnected() {
-		// 确认的临时连接断开不属于无效连接
-		if !findConn.Value.CheckFlag(types.ConnectionFlag_Temporary) || !findConn.Value.CheckFlag(types.ConnectionFlag_PeerClosed) {
-			var fg nodeFlagGuard
-			fg.openFlag(n, types.NodeFlag_InCallback)
-			n.eventHandleset.OnInvalidConnection(n, findConn.Value, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
-			fg.closeFlag()
+	var connWithLifetime *Connection
+	n.eventTimer.connectingListMu.Lock()
+	if pair, exists := n.eventTimer.connectingListByPtr.Get(conn, false); exists {
+		connWithLifetime = pair.Value
+		n.eventTimer.connectingListByPtr.Delete(conn)
+	}
+	if addr := conn.GetAddress(); addr != nil && n.eventTimer.connectingListByChannel != nil {
+		if chConn, exists := n.eventTimer.connectingListByChannel[addr.GetAddress()]; exists && chConn == conn {
+			if connWithLifetime == nil {
+				connWithLifetime = chConn
+			}
+			delete(n.eventTimer.connectingListByChannel, addr.GetAddress())
 		}
 	}
+	n.eventTimer.connectingListMu.Unlock()
 
-	n.eventTimer.connectingList.Delete(conn.GetAddress().GetAddress())
+	// connection::reset 可能重入回调进来，此时已删除则直接返回即可
+	if connWithLifetime == nil {
+		return false
+	}
+
+	peerClosedTemporary := connWithLifetime.CheckFlag(types.ConnectionFlag_Temporary) &&
+		connWithLifetime.CheckFlag(types.ConnectionFlag_PeerClosed)
+	if reset {
+		connWithLifetime.Reset()
+	}
+
+	if n.eventHandleset.OnInvalidConnection != nil && !connWithLifetime.IsConnected() && !peerClosedTemporary {
+		var fg nodeFlagGuard
+		fg.openFlag(n, types.NodeFlag_InCallback)
+		n.eventHandleset.OnInvalidConnection(n, connWithLifetime, error_code.EN_ATBUS_ERR_NODE_TIMEOUT)
+		fg.closeFlag()
+	}
+
+	return true
 }
 
 func (n *Node) LogDebug(ep types.Endpoint, conn types.Connection, m *types.Message, msg string, args ...any) {

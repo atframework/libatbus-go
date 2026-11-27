@@ -25,21 +25,21 @@ type ATBUS_PROTOCOL_CONST int32
 
 const (
 	ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_CONST_UNKNOWN   ATBUS_PROTOCOL_CONST = 0
-	ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_VERSION         ATBUS_PROTOCOL_CONST = 3
-	ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_MINIMAL_VERSION ATBUS_PROTOCOL_CONST = 3 // minimal protocol version supported
+	ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_VERSION         ATBUS_PROTOCOL_CONST = 5
+	ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_MINIMAL_VERSION ATBUS_PROTOCOL_CONST = 5 // minimal protocol version supported
 )
 
 // Enum value maps for ATBUS_PROTOCOL_CONST.
 var (
 	ATBUS_PROTOCOL_CONST_name = map[int32]string{
 		0: "ATBUS_PROTOCOL_CONST_UNKNOWN",
-		3: "ATBUS_PROTOCOL_VERSION",
-		// Duplicate value: 3: "ATBUS_PROTOCOL_MINIMAL_VERSION",
+		5: "ATBUS_PROTOCOL_VERSION",
+		// Duplicate value: 5: "ATBUS_PROTOCOL_MINIMAL_VERSION",
 	}
 	ATBUS_PROTOCOL_CONST_value = map[string]int32{
 		"ATBUS_PROTOCOL_CONST_UNKNOWN":   0,
-		"ATBUS_PROTOCOL_VERSION":         3,
-		"ATBUS_PROTOCOL_MINIMAL_VERSION": 3,
+		"ATBUS_PROTOCOL_VERSION":         5,
+		"ATBUS_PROTOCOL_MINIMAL_VERSION": 5,
 	}
 )
 
@@ -861,8 +861,16 @@ func (x *AccessData) GetSignature() [][]byte {
 }
 
 type ChannelData struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Address string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	// match register_data.scope with "Equal" operator
+	MatchScope string `protobuf:"bytes,11,opt,name=match_scope,json=matchScope,proto3" json:"match_scope,omitempty"`
+	// match register_data.hostname with "In" operator
+	MatchHosts []string `protobuf:"bytes,12,rep,name=match_hosts,json=matchHosts,proto3" json:"match_hosts,omitempty"`
+	// match register_data.namespace_name with "In" operator
+	MatchNamespaces []string `protobuf:"bytes,21,rep,name=match_namespaces,json=matchNamespaces,proto3" json:"match_namespaces,omitempty"`
+	// match register_data.labels with "Contains" operator
+	MatchLabels   map[string]string `protobuf:"bytes,22,rep,name=match_labels,json=matchLabels,proto3" json:"match_labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -902,6 +910,34 @@ func (x *ChannelData) GetAddress() string {
 		return x.Address
 	}
 	return ""
+}
+
+func (x *ChannelData) GetMatchScope() string {
+	if x != nil {
+		return x.MatchScope
+	}
+	return ""
+}
+
+func (x *ChannelData) GetMatchHosts() []string {
+	if x != nil {
+		return x.MatchHosts
+	}
+	return nil
+}
+
+func (x *ChannelData) GetMatchNamespaces() []string {
+	if x != nil {
+		return x.MatchNamespaces
+	}
+	return nil
+}
+
+func (x *ChannelData) GetMatchLabels() map[string]string {
+	if x != nil {
+		return x.MatchLabels
+	}
+	return nil
 }
 
 type PingData struct {
@@ -968,6 +1004,9 @@ type RegisterData struct {
 	AccessKey                     *AccessData                        `protobuf:"bytes,8,opt,name=access_key,json=accessKey,proto3" json:"access_key,omitempty"`
 	HashCode                      string                             `protobuf:"bytes,10,opt,name=hash_code,json=hashCode,proto3" json:"hash_code,omitempty"`
 	CryptoHandshake               *CryptoHandshakeData               `protobuf:"bytes,11,opt,name=crypto_handshake,json=cryptoHandshake,proto3" json:"crypto_handshake,omitempty"`
+	Scope                         string                             `protobuf:"bytes,12,opt,name=scope,proto3" json:"scope,omitempty"`
+	NamespaceName                 string                             `protobuf:"bytes,13,opt,name=namespace_name,json=namespaceName,proto3" json:"namespace_name,omitempty"`
+	Labels                        map[string]string                  `protobuf:"bytes,14,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields                 protoimpl.UnknownFields
 	sizeCache                     protoimpl.SizeCache
 }
@@ -1068,6 +1107,27 @@ func (x *RegisterData) GetHashCode() string {
 func (x *RegisterData) GetCryptoHandshake() *CryptoHandshakeData {
 	if x != nil {
 		return x.CryptoHandshake
+	}
+	return nil
+}
+
+func (x *RegisterData) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *RegisterData) GetNamespaceName() string {
+	if x != nil {
+		return x.NamespaceName
+	}
+	return ""
+}
+
+func (x *RegisterData) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
 	}
 	return nil
 }
@@ -1562,13 +1622,22 @@ const file_libatbus_protocol_proto_rawDesc = "" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x16\n" +
 	"\x06nonce1\x18\x03 \x01(\x04R\x06nonce1\x12\x16\n" +
 	"\x06nonce2\x18\x04 \x01(\x04R\x06nonce2\x12\x1c\n" +
-	"\tsignature\x18\t \x03(\fR\tsignature\"(\n" +
+	"\tsignature\x18\t \x03(\fR\tsignature\"\xb3\x02\n" +
 	"\fchannel_data\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x88\x01\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x1f\n" +
+	"\vmatch_scope\x18\v \x01(\tR\n" +
+	"matchScope\x12\x1f\n" +
+	"\vmatch_hosts\x18\f \x03(\tR\n" +
+	"matchHosts\x12)\n" +
+	"\x10match_namespaces\x18\x15 \x03(\tR\x0fmatchNamespaces\x12\\\n" +
+	"\fmatch_labels\x18\x16 \x03(\v29.atframework.atbus.protocol.channel_data.MatchLabelsEntryR\vmatchLabels\x1a>\n" +
+	"\x10MatchLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x88\x01\n" +
 	"\tping_data\x12\x1d\n" +
 	"\n" +
 	"time_point\x18\x01 \x01(\x03R\ttimePoint\x12\\\n" +
-	"\x10crypto_handshake\x18\x02 \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\"\xb4\x04\n" +
+	"\x10crypto_handshake\x18\x02 \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\"\xfb\x05\n" +
 	"\rregister_data\x12\x15\n" +
 	"\x06bus_id\x18\x01 \x01(\x04R\x05busId\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\x05R\x03pid\x12\x1a\n" +
@@ -1581,7 +1650,13 @@ const file_libatbus_protocol_proto_rawDesc = "" +
 	"access_key\x18\b \x01(\v2'.atframework.atbus.protocol.access_dataR\taccessKey\x12\x1b\n" +
 	"\thash_code\x18\n" +
 	" \x01(\tR\bhashCode\x12\\\n" +
-	"\x10crypto_handshake\x18\v \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\"4\n" +
+	"\x10crypto_handshake\x18\v \x01(\v21.atframework.atbus.protocol.crypto_handshake_dataR\x0fcryptoHandshake\x12\x14\n" +
+	"\x05scope\x18\f \x01(\tR\x05scope\x12%\n" +
+	"\x0enamespace_name\x18\r \x01(\tR\rnamespaceName\x12M\n" +
+	"\x06labels\x18\x0e \x03(\v25.atframework.atbus.protocol.register_data.LabelsEntryR\x06labels\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"4\n" +
 	"\x16handshake_confirm_data\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\"\x8e\x01\n" +
 	"\x13message_head_crypto\x12U\n" +
@@ -1614,8 +1689,8 @@ const file_libatbus_protocol_proto_rawDesc = "" +
 	"\fmessage_type*|\n" +
 	"\x14ATBUS_PROTOCOL_CONST\x12 \n" +
 	"\x1cATBUS_PROTOCOL_CONST_UNKNOWN\x10\x00\x12\x1a\n" +
-	"\x16ATBUS_PROTOCOL_VERSION\x10\x03\x12\"\n" +
-	"\x1eATBUS_PROTOCOL_MINIMAL_VERSION\x10\x03\x1a\x02\x10\x01*]\n" +
+	"\x16ATBUS_PROTOCOL_VERSION\x10\x05\x12\"\n" +
+	"\x1eATBUS_PROTOCOL_MINIMAL_VERSION\x10\x05\x1a\x02\x10\x01*]\n" +
 	"\x1cATBUS_FORWARD_DATA_FLAG_TYPE\x12\x1a\n" +
 	"\x16FORWARD_DATA_FLAG_NONE\x10\x00\x12!\n" +
 	"\x1dFORWARD_DATA_FLAG_REQUIRE_RSP\x10\x01*O\n" +
@@ -1669,7 +1744,7 @@ func file_libatbus_protocol_proto_rawDescGZIP() []byte {
 }
 
 var file_libatbus_protocol_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_libatbus_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_libatbus_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_libatbus_protocol_proto_goTypes = []any{
 	(ATBUS_PROTOCOL_CONST)(0),             // 0: atframework.atbus.protocol.ATBUS_PROTOCOL_CONST
 	(ATBUS_FORWARD_DATA_FLAG_TYPE)(0),     // 1: atframework.atbus.protocol.ATBUS_FORWARD_DATA_FLAG_TYPE
@@ -1692,6 +1767,8 @@ var file_libatbus_protocol_proto_goTypes = []any{
 	(*MessageHeadCompression)(nil),        // 18: atframework.atbus.protocol.message_head_compression
 	(*MessageHead)(nil),                   // 19: atframework.atbus.protocol.message_head
 	(*MessageBody)(nil),                   // 20: atframework.atbus.protocol.message_body
+	nil,                                   // 21: atframework.atbus.protocol.channel_data.MatchLabelsEntry
+	nil,                                   // 22: atframework.atbus.protocol.register_data.LabelsEntry
 }
 var file_libatbus_protocol_proto_depIdxs = []int32{
 	5,  // 0: atframework.atbus.protocol.crypto_handshake_data.type:type_name -> atframework.atbus.protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
@@ -1700,29 +1777,31 @@ var file_libatbus_protocol_proto_depIdxs = []int32{
 	9,  // 3: atframework.atbus.protocol.custom_command_data.commands:type_name -> atframework.atbus.protocol.custom_command_argv
 	12, // 4: atframework.atbus.protocol.custom_command_data.access_key:type_name -> atframework.atbus.protocol.access_data
 	2,  // 5: atframework.atbus.protocol.access_data.algorithm:type_name -> atframework.atbus.protocol.ATBUS_ACCESS_DATA_ALGORITHM_TYPE
-	8,  // 6: atframework.atbus.protocol.ping_data.crypto_handshake:type_name -> atframework.atbus.protocol.crypto_handshake_data
-	13, // 7: atframework.atbus.protocol.register_data.channels:type_name -> atframework.atbus.protocol.channel_data
-	6,  // 8: atframework.atbus.protocol.register_data.supported_compression_algorithm:type_name -> atframework.atbus.protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
-	12, // 9: atframework.atbus.protocol.register_data.access_key:type_name -> atframework.atbus.protocol.access_data
-	8,  // 10: atframework.atbus.protocol.register_data.crypto_handshake:type_name -> atframework.atbus.protocol.crypto_handshake_data
-	4,  // 11: atframework.atbus.protocol.message_head_crypto.algorithm:type_name -> atframework.atbus.protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
-	6,  // 12: atframework.atbus.protocol.message_head_compression.type:type_name -> atframework.atbus.protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
-	17, // 13: atframework.atbus.protocol.message_head.crypto:type_name -> atframework.atbus.protocol.message_head_crypto
-	18, // 14: atframework.atbus.protocol.message_head.compression:type_name -> atframework.atbus.protocol.message_head_compression
-	10, // 15: atframework.atbus.protocol.message_body.custom_command_req:type_name -> atframework.atbus.protocol.custom_command_data
-	10, // 16: atframework.atbus.protocol.message_body.custom_command_rsp:type_name -> atframework.atbus.protocol.custom_command_data
-	11, // 17: atframework.atbus.protocol.message_body.data_transform_req:type_name -> atframework.atbus.protocol.forward_data
-	11, // 18: atframework.atbus.protocol.message_body.data_transform_rsp:type_name -> atframework.atbus.protocol.forward_data
-	15, // 19: atframework.atbus.protocol.message_body.node_register_req:type_name -> atframework.atbus.protocol.register_data
-	15, // 20: atframework.atbus.protocol.message_body.node_register_rsp:type_name -> atframework.atbus.protocol.register_data
-	14, // 21: atframework.atbus.protocol.message_body.node_ping_req:type_name -> atframework.atbus.protocol.ping_data
-	14, // 22: atframework.atbus.protocol.message_body.node_pong_rsp:type_name -> atframework.atbus.protocol.ping_data
-	16, // 23: atframework.atbus.protocol.message_body.handshake_confirm:type_name -> atframework.atbus.protocol.handshake_confirm_data
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	21, // 6: atframework.atbus.protocol.channel_data.match_labels:type_name -> atframework.atbus.protocol.channel_data.MatchLabelsEntry
+	8,  // 7: atframework.atbus.protocol.ping_data.crypto_handshake:type_name -> atframework.atbus.protocol.crypto_handshake_data
+	13, // 8: atframework.atbus.protocol.register_data.channels:type_name -> atframework.atbus.protocol.channel_data
+	6,  // 9: atframework.atbus.protocol.register_data.supported_compression_algorithm:type_name -> atframework.atbus.protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
+	12, // 10: atframework.atbus.protocol.register_data.access_key:type_name -> atframework.atbus.protocol.access_data
+	8,  // 11: atframework.atbus.protocol.register_data.crypto_handshake:type_name -> atframework.atbus.protocol.crypto_handshake_data
+	22, // 12: atframework.atbus.protocol.register_data.labels:type_name -> atframework.atbus.protocol.register_data.LabelsEntry
+	4,  // 13: atframework.atbus.protocol.message_head_crypto.algorithm:type_name -> atframework.atbus.protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
+	6,  // 14: atframework.atbus.protocol.message_head_compression.type:type_name -> atframework.atbus.protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
+	17, // 15: atframework.atbus.protocol.message_head.crypto:type_name -> atframework.atbus.protocol.message_head_crypto
+	18, // 16: atframework.atbus.protocol.message_head.compression:type_name -> atframework.atbus.protocol.message_head_compression
+	10, // 17: atframework.atbus.protocol.message_body.custom_command_req:type_name -> atframework.atbus.protocol.custom_command_data
+	10, // 18: atframework.atbus.protocol.message_body.custom_command_rsp:type_name -> atframework.atbus.protocol.custom_command_data
+	11, // 19: atframework.atbus.protocol.message_body.data_transform_req:type_name -> atframework.atbus.protocol.forward_data
+	11, // 20: atframework.atbus.protocol.message_body.data_transform_rsp:type_name -> atframework.atbus.protocol.forward_data
+	15, // 21: atframework.atbus.protocol.message_body.node_register_req:type_name -> atframework.atbus.protocol.register_data
+	15, // 22: atframework.atbus.protocol.message_body.node_register_rsp:type_name -> atframework.atbus.protocol.register_data
+	14, // 23: atframework.atbus.protocol.message_body.node_ping_req:type_name -> atframework.atbus.protocol.ping_data
+	14, // 24: atframework.atbus.protocol.message_body.node_pong_rsp:type_name -> atframework.atbus.protocol.ping_data
+	16, // 25: atframework.atbus.protocol.message_body.handshake_confirm:type_name -> atframework.atbus.protocol.handshake_confirm_data
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_libatbus_protocol_proto_init() }
@@ -1747,7 +1826,7 @@ func file_libatbus_protocol_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_libatbus_protocol_proto_rawDesc), len(file_libatbus_protocol_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

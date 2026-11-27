@@ -109,11 +109,11 @@ type IoStreamConnection struct {
 	// address is the parsed connection address
 	address types.ChannelAddress
 
-	// status is the current connection status
-	status IoStreamConnectionStatus
+	// status is the current connection status (atomic IoStreamConnectionStatus)
+	status atomic.Int32
 
-	// flags holds connection flags
-	flags uint32
+	// flags holds connection flags (atomic bitmask of IoStreamConnectionFlag)
+	flags atomic.Uint32
 
 	// eventHandleSet holds event callbacks
 	eventHandleSet IoStreamCallbackEventHandleSet
@@ -133,7 +133,9 @@ type IoStreamConnection struct {
 	// nil when no large frame is being read. Matches C++ read_buffer_manager body phase.
 	readLargeFrame *readLargeFrameState
 
-	// writeQueue is the channel for outgoing messages
+	// writeQueue is the channel for outgoing messages.
+	// It is intentionally never closed; teardown is signaled via closedCh so
+	// Send can enqueue without taking a mutex and without send-on-closed panics.
 	writeQueue chan []byte
 
 	// disconnectCh is closed to signal writeLoop for graceful disconnect draining
@@ -141,14 +143,15 @@ type IoStreamConnection struct {
 	// disconnectOnce ensures disconnectCh is closed at most once
 	disconnectOnce sync.Once
 
-	// privateData holds user-defined data
-	privateData interface{}
+	// closedCh is closed once in disconnectRun to wake writeLoop and abort Send immediately
+	closedCh chan struct{}
 
-	// mu protects concurrent access
-	mu sync.RWMutex
+	// privateData holds user-defined data
+	privateData atomic.Pointer[any]
 
 	// closed indicates if the connection has been closed
-	closed atomic.Bool
+	closed     atomic.Bool
+	peerClosed atomic.Bool
 
 	// readEgainCount tracks EAGAIN errors
 	readEgainCount uint64
@@ -158,6 +161,11 @@ type IoStreamConnection struct {
 	checkHashFailedCount uint64
 }
 
+// IsPeerClosed reports whether the read loop observed EOF or a peer reset.
+func (c *IoStreamConnection) IsPeerClosed() bool {
+	return c.peerClosed.Load()
+}
+
 // GetAddress returns the connection address.
 func (c *IoStreamConnection) GetAddress() types.ChannelAddress {
 	return c.address
@@ -165,34 +173,26 @@ func (c *IoStreamConnection) GetAddress() types.ChannelAddress {
 
 // GetStatus returns the current connection status.
 func (c *IoStreamConnection) GetStatus() IoStreamConnectionStatus {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.status
+	return IoStreamConnectionStatus(c.status.Load())
 }
 
 // SetStatus sets the connection status.
 func (c *IoStreamConnection) SetStatus(status IoStreamConnectionStatus) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status = status
+	c.status.Store(int32(status))
 }
 
 // SetFlag sets or clears a connection flag.
 func (c *IoStreamConnection) SetFlag(f IoStreamConnectionFlag, v bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if v {
-		c.flags |= uint32(f)
+		c.flags.Or(uint32(f))
 	} else {
-		c.flags &^= uint32(f)
+		c.flags.And(^uint32(f))
 	}
 }
 
 // GetFlag returns whether a flag is set.
 func (c *IoStreamConnection) GetFlag(f IoStreamConnectionFlag) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return (c.flags & uint32(f)) != 0
+	return (c.flags.Load() & uint32(f)) != 0
 }
 
 // GetChannel returns the parent channel.
@@ -217,16 +217,21 @@ func (c *IoStreamConnection) GetReadBufferManager() *buffer.BufferManager {
 
 // SetPrivateData sets user-defined private data.
 func (c *IoStreamConnection) SetPrivateData(data interface{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.privateData = data
+	if data == nil {
+		c.privateData.Store(nil)
+		return
+	}
+	v := data
+	c.privateData.Store(&v)
 }
 
 // GetPrivateData returns user-defined private data.
 func (c *IoStreamConnection) GetPrivateData() interface{} {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.privateData
+	p := c.privateData.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // GetNetConn returns the underlying net.Conn.

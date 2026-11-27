@@ -73,6 +73,8 @@ type Connection interface {
 
 	GetAddress() ChannelAddress
 
+	GetOriginAddress() string
+
 	IsConnected() bool
 
 	IsRunning() bool

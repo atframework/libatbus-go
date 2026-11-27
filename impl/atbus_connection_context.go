@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -223,9 +225,16 @@ func compressionAlgorithmToAdapter(c protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE) 
 	}
 }
 
+func normalizeKeyExchangeType(k protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE) protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE {
+	if keyExchangeCurve(k) == nil {
+		return protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE
+	}
+	return k
+}
+
 func compressionAlgorithmSupported(c protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE) bool {
 	if c == protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE {
-		return true
+		return false
 	}
 	return compression.IsAlgorithmSupported(compressionAlgorithmToAdapter(c))
 }
@@ -331,6 +340,18 @@ func (cs *CryptoSession) GetPublicKey() []byte {
 		return nil
 	}
 	return cs.publicKey.Bytes()
+}
+
+func (cs *CryptoSession) hasPrivateKey() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.privateKey != nil
+}
+
+func (cs *CryptoSession) clearPrivateKey() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.privateKey = nil
 }
 
 // ComputeSharedSecret computes the shared secret using the peer's public key.
@@ -751,24 +772,28 @@ func (cs *CryptoSession) encryptChaCha20WithIV(plaintext []byte, iv []byte) ([]b
 }
 
 // encryptXXTEA encrypts using XXTEA algorithm.
-// Applies PKCS#7 padding to 4-byte boundary before encryption (matching C++ behavior).
+// Pads plaintext to an 8-byte boundary (matching C++ atframe_utils XXTEA block_size=8 and
+// atbus::connection_context::pack_message_with): exact multiples of 8 add no padding bytes,
+// while non-multiples fill trailing bytes with the padding count (1..7).
 // Caller must hold the lock.
 func (cs *CryptoSession) encryptXXTEA(plaintext []byte) ([]byte, error) {
 	if cs.xxteaKey == nil {
 		return nil, ErrCryptoNotInitialized
 	}
 
-	// Apply PKCS#7 padding to 4-byte boundary (matching C++ pack_message_with)
-	const blockSize = 4
-	padding := blockSize - (len(plaintext) % blockSize)
-	paddedLen := len(plaintext) + padding
-	if paddedLen < 8 {
-		paddedLen = 8
+	if len(plaintext) == 0 {
+		return []byte{}, nil
 	}
+
+	const blockSize = 8
+	paddedLen := ((len(plaintext) + blockSize - 1) / blockSize) * blockSize
+	padding := paddedLen - len(plaintext)
 	padded := make([]byte, paddedLen)
 	copy(padded, plaintext)
-	for i := len(plaintext); i < len(plaintext)+padding; i++ {
-		padded[i] = byte(padding)
+	if padding > 0 {
+		for i := len(plaintext); i < paddedLen; i++ {
+			padded[i] = byte(padding)
+		}
 	}
 
 	err := xxtea.EncryptInPlace(cs.xxteaKey, padded)
@@ -779,16 +804,22 @@ func (cs *CryptoSession) encryptXXTEA(plaintext []byte) ([]byte, error) {
 }
 
 // decryptXXTEA decrypts using XXTEA algorithm.
-// Returns decrypted data including PKCS#7 padding bytes.
-// The caller should use body_size from the message header to truncate to the original size.
+// Rejects empty or non-8-byte-aligned ciphertexts (matching C++ atframe_utils XXTEA).
+// Returns decrypted data including any trailing padding bytes; the caller should use
+// body_size from the message header to truncate to the original size.
 // Caller must hold the lock.
 func (cs *CryptoSession) decryptXXTEA(ciphertext []byte) ([]byte, error) {
 	if cs.xxteaKey == nil {
 		return nil, ErrCryptoNotInitialized
 	}
 
-	result, err := xxtea.Decrypt(cs.xxteaKey, ciphertext)
-	if err != nil {
+	if len(ciphertext) == 0 || len(ciphertext)%8 != 0 {
+		return nil, fmt.Errorf("%w: invalid xxtea ciphertext length %d", ErrCryptoDecryptFailed, len(ciphertext))
+	}
+
+	result := make([]byte, len(ciphertext))
+	copy(result, ciphertext)
+	if err := xxtea.DecryptInPlace(cs.xxteaKey, result); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCryptoDecryptFailed, err)
 	}
 	return result, nil
@@ -1249,21 +1280,29 @@ type ConnectionContext struct {
 	handshakeStartTime      time.Time
 	handshakeSequence       uint64
 
+	// Selected algorithms (matching C++ connection_context fields)
+	cryptoKeyExchangeAlgorithm protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
+	cryptoSelectKdfType        protocol.ATBUS_CRYPTO_KDF_TYPE
+	cryptoSelectAlgorithm      protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
+
 	// Supported algorithms
 	supportedCryptoAlgorithms      []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
 	supportedCompressionAlgorithms []protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
-	supportedKeyExchange           protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
 	supportedKDFTypes              []protocol.ATBUS_CRYPTO_KDF_TYPE
 }
 
 // NewConnectionContext creates a new connection context with default settings.
+// Mirrors C++ connection_context::create: unsupported key exchange types fall back to NONE.
 func NewConnectionContext(keyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE) *ConnectionContext {
 	ret := &ConnectionContext{
-		readCrypto:             NewCryptoSession(),
-		writeCrypto:            NewCryptoSession(),
-		handshakeCrypto:        NewCryptoSession(),
-		handshakeReceiveCrypto: nil,
-		compression:            NewCompressionSession(),
+		readCrypto:                 NewCryptoSession(),
+		writeCrypto:                NewCryptoSession(),
+		handshakeCrypto:            NewCryptoSession(),
+		handshakeReceiveCrypto:     nil,
+		compression:                NewCompressionSession(),
+		cryptoKeyExchangeAlgorithm: normalizeKeyExchangeType(keyExchangeType),
+		cryptoSelectKdfType:        protocol.ATBUS_CRYPTO_KDF_TYPE_ATBUS_CRYPTO_KDF_HKDF_SHA256,
+		cryptoSelectAlgorithm:      protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE,
 		supportedCryptoAlgorithms: []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM,
@@ -1276,13 +1315,11 @@ func NewConnectionContext(keyExchangeType protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYP
 			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE,
 		},
 		supportedCompressionAlgorithms: nil,
-		supportedKeyExchange:           keyExchangeType,
 		supportedKDFTypes: []protocol.ATBUS_CRYPTO_KDF_TYPE{
 			protocol.ATBUS_CRYPTO_KDF_TYPE_ATBUS_CRYPTO_KDF_HKDF_SHA256,
 		},
 	}
 
-	ret.supportedCompressionAlgorithms = ret.GetSupportedCompressionAlgorithms()
 	return ret
 }
 
@@ -1314,37 +1351,32 @@ func (cc *ConnectionContext) GetHandshakeStartTime() time.Time {
 	return cc.handshakeStartTime
 }
 
-// GetCryptoKeyExchangeAlgorithm returns the key exchange algorithm used for crypto handshake.
+// GetCryptoKeyExchangeAlgorithm returns the selected key exchange algorithm configured for this context,
+// matching C++ connection_context::get_crypto_key_exchange_algorithm().
 func (cc *ConnectionContext) GetCryptoKeyExchangeAlgorithm() protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if cc.handshakeCrypto != nil {
-		return cc.handshakeCrypto.KeyExchange
-	}
-	return protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE
+	return cc.cryptoKeyExchangeAlgorithm
 }
 
-// GetCryptoSelectKdfType returns the KDF type selected during handshake.
+// GetCryptoSelectKdfType returns the KDF type selected during handshake,
+// matching C++ connection_context::get_crypto_select_kdf_type().
 func (cc *ConnectionContext) GetCryptoSelectKdfType() protocol.ATBUS_CRYPTO_KDF_TYPE {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if cc.handshakeCrypto != nil {
-		return cc.handshakeCrypto.KDFType
-	}
-	return protocol.ATBUS_CRYPTO_KDF_TYPE_ATBUS_CRYPTO_KDF_HKDF_SHA256
+	return cc.cryptoSelectKdfType
 }
 
-// GetCryptoSelectAlgorithm returns the crypto algorithm selected during handshake.
+// GetCryptoSelectAlgorithm returns the crypto algorithm selected during handshake,
+// matching C++ connection_context::get_crypto_select_algorithm().
 func (cc *ConnectionContext) GetCryptoSelectAlgorithm() protocol.ATBUS_CRYPTO_ALGORITHM_TYPE {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if cc.writeCrypto != nil && cc.writeCrypto.IsInitialized() {
-		return cc.writeCrypto.Algorithm
-	}
-	return protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE
+	return cc.cryptoSelectAlgorithm
 }
 
-// GetCompressSelectAlgorithm returns the compression algorithm selected during handshake.
+// GetCompressSelectAlgorithm returns the compression algorithm selected for this connection,
+// matching C++ connection_context::get_compression_select_algorithm().
 func (cc *ConnectionContext) GetCompressSelectAlgorithm() protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
@@ -1408,18 +1440,19 @@ func (cc *ConnectionContext) GetSupportedCompressionAlgorithms() []protocol.ATBU
 	return result
 }
 
-// SetSupportedKeyExchange sets the supported key exchange type.
+// SetSupportedKeyExchange updates the key exchange algorithm configured for this context.
+// Unsupported values fall back to ATBUS_CRYPTO_KEY_EXCHANGE_NONE.
 func (cc *ConnectionContext) SetSupportedKeyExchange(keyExchange protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.supportedKeyExchange = keyExchange
+	cc.cryptoKeyExchangeAlgorithm = normalizeKeyExchangeType(keyExchange)
 }
 
-// GetSupportedKeyExchange returns the supported key exchange type.
+// GetSupportedKeyExchange returns the key exchange algorithm configured for this context.
 func (cc *ConnectionContext) GetSupportedKeyExchange() protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	return cc.supportedKeyExchange
+	return cc.cryptoKeyExchangeAlgorithm
 }
 
 // CreateHandshakeData creates the handshake data for initiating a handshake.
@@ -1432,13 +1465,13 @@ func (cc *ConnectionContext) CreateHandshakeData() (*CryptoHandshakeData, error)
 	}
 
 	// Generate key pair
-	if err := cc.handshakeCrypto.GenerateKeyPair(cc.supportedKeyExchange); err != nil {
+	if err := cc.handshakeCrypto.GenerateKeyPair(cc.cryptoKeyExchangeAlgorithm); err != nil {
 		return nil, err
 	}
 
 	return &CryptoHandshakeData{
 		Sequence:    atomic.AddUint64(&cc.sequence, 1),
-		KeyExchange: cc.supportedKeyExchange,
+		KeyExchange: cc.cryptoKeyExchangeAlgorithm,
 		KDFTypes:    cc.supportedKDFTypes,
 		Algorithms:  cc.supportedCryptoAlgorithms,
 		PublicKey:   cc.handshakeCrypto.GetPublicKey(),
@@ -1457,9 +1490,9 @@ func (cc *ConnectionContext) ProcessHandshakeData(peerData *CryptoHandshakeData)
 	}
 
 	// Negotiate key exchange
-	keyExchange := NegotiateKeyExchange(cc.supportedKeyExchange, peerData.KeyExchange)
+	keyExchange := NegotiateKeyExchange(cc.cryptoKeyExchangeAlgorithm, peerData.KeyExchange)
 	if keyExchange == protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE &&
-		cc.supportedKeyExchange != protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
+		cc.cryptoKeyExchangeAlgorithm != protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
 		return fmt.Errorf("%w: key exchange mismatch", ErrCryptoHandshakeFailed)
 	}
 
@@ -1470,7 +1503,7 @@ func (cc *ConnectionContext) ProcessHandshakeData(peerData *CryptoHandshakeData)
 	kdf := NegotiateKDF(cc.supportedKDFTypes, peerData.KDFTypes)
 
 	// Generate key pair if not already done
-	if cc.handshakeCrypto.privateKey == nil {
+	if !cc.handshakeCrypto.hasPrivateKey() {
 		if err := cc.handshakeCrypto.GenerateKeyPair(keyExchange); err != nil {
 			return err
 		}
@@ -1495,6 +1528,8 @@ func (cc *ConnectionContext) ProcessHandshakeData(peerData *CryptoHandshakeData)
 		return err
 	}
 
+	cc.cryptoSelectKdfType = kdf
+	cc.cryptoSelectAlgorithm = algorithm
 	cc.handshakeDone = true
 	return nil
 }
@@ -1511,12 +1546,17 @@ func (cc *ConnectionContext) NegotiateCompressionWithPeer(peerAlgorithms []proto
 // HandshakeGenerateSelfKey generates the local ECDH key pair for handshake.
 // In client mode, peerSequenceId should be 0 to generate a new sequence.
 // In server mode, peerSequenceId should be the peer's handshake sequence.
+// Mirrors C++ connection_context::handshake_generate_self_key.
 func (cc *ConnectionContext) HandshakeGenerateSelfKey(peerSequenceId uint64) error_code.ErrorType {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
 	if cc.closing {
 		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
+	}
+
+	if cc.cryptoKeyExchangeAlgorithm == protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE {
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
 	// Set handshake start time
@@ -1530,7 +1570,7 @@ func (cc *ConnectionContext) HandshakeGenerateSelfKey(peerSequenceId uint64) err
 	}
 
 	// Generate key pair using the configured key exchange algorithm
-	if err := cc.handshakeCrypto.GenerateKeyPair(cc.supportedKeyExchange); err != nil {
+	if err := cc.handshakeCrypto.GenerateKeyPair(cc.cryptoKeyExchangeAlgorithm); err != nil {
 		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_KEY_PAIR
 	}
 
@@ -1538,6 +1578,7 @@ func (cc *ConnectionContext) HandshakeGenerateSelfKey(peerSequenceId uint64) err
 }
 
 // HandshakeReadPeerKey reads the peer's public key and computes the shared secret.
+// Mirrors C++ connection_context::handshake_read_peer_key.
 func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHandshakeData,
 	supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
 	needConfirm bool,
@@ -1553,24 +1594,61 @@ func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHan
 		return error_code.EN_ATBUS_ERR_PARAMS
 	}
 
-	// Verify key exchange algorithm matches
-	if peerPubKey.GetType() != cc.supportedKeyExchange {
-		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_READ_PEER_KEY
+	if cc.cryptoKeyExchangeAlgorithm == protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE ||
+		!cc.handshakeCrypto.hasPrivateKey() {
+		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	// Compute shared secret
-	sharedSecret, err := cc.handshakeCrypto.ComputeSharedSecret(peerPubKey.GetPublicKey())
-	if err != nil {
-		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
+	if peerPubKey.GetSequence() != cc.handshakeSequence {
+		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_SEQUENCE_EXPIRED
 	}
 
-	// Negotiate crypto algorithm
+	// Clear the ephemeral DH private key on exit (matching C++ handshake_dh_.reset()),
+	// while retaining handshakeCrypto.publicKey for HandshakeWriteSelfPublicKey.
+	defer cc.handshakeCrypto.clearPrivateKey()
+
 	peerAlgorithms := peerPubKey.GetAlgorithms()
-	algorithm := NegotiateCryptoAlgorithm(supportedCryptoAlgorithms, peerAlgorithms)
+	if len(supportedCryptoAlgorithms) == 0 && len(peerAlgorithms) == 0 {
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
+	// Verify key exchange algorithm matches
+	if peerPubKey.GetType() != cc.cryptoKeyExchangeAlgorithm {
+		return error_code.EN_ATBUS_ERR_CRYPTO_ALGORITHM_NOT_MATCH
+	}
 
 	// Negotiate KDF
 	peerKDFs := peerPubKey.GetKdfType()
 	kdf := NegotiateKDF(cc.supportedKDFTypes, peerKDFs)
+	cc.cryptoSelectKdfType = kdf
+
+	// The initiator's offer determines preference. C++ responders may send
+	// their whole allowlist in the response instead of just the selected cipher.
+	preferred, allowed := supportedCryptoAlgorithms, peerAlgorithms
+	if needConfirm {
+		preferred, allowed = peerAlgorithms, supportedCryptoAlgorithms
+	}
+	algorithm := protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE
+	for _, candidate := range preferred {
+		if candidate != protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE && slices.Contains(allowed, candidate) {
+			algorithm = candidate
+			break
+		}
+	}
+	cc.cryptoSelectAlgorithm = algorithm
+	if algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE {
+		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_NO_AVAILABLE_ALGORITHM
+	}
+
+	// The C++ crypto backend encodes the ECDH point as a TLS ECPoint.
+	publicKey := peerPubKey.GetPublicKey()
+	if len(publicKey) < 2 || int(publicKey[0]) != len(publicKey)-1 {
+		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_READ_PEER_KEY
+	}
+	sharedSecret, err := cc.handshakeCrypto.ComputeSharedSecret(publicKey[1:])
+	if err != nil {
+		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
+	}
 
 	// Derive keys
 	if err := cc.handshakeCrypto.DeriveKey(sharedSecret, algorithm, kdf); err != nil {
@@ -1603,6 +1681,7 @@ func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHan
 }
 
 // HandshakeWriteSelfPublicKey writes the local public key to the handshake data structure.
+// Mirrors C++ connection_context::handshake_write_self_public_key.
 func (cc *ConnectionContext) HandshakeWriteSelfPublicKey(
 	selfPubKey *protocol.CryptoHandshakeData,
 	supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE,
@@ -1626,10 +1705,25 @@ func (cc *ConnectionContext) HandshakeWriteSelfPublicKey(
 
 	// Fill in the handshake data
 	selfPubKey.Sequence = cc.handshakeSequence
-	selfPubKey.Type = cc.supportedKeyExchange
-	selfPubKey.KdfType = cc.supportedKDFTypes
-	selfPubKey.Algorithms = supportedCryptoAlgorithms
-	selfPubKey.PublicKey = pubKey
+	selfPubKey.Type = cc.cryptoKeyExchangeAlgorithm
+	if cc.writeCrypto.IsInitialized() || cc.readCrypto.IsInitialized() {
+		selfPubKey.KdfType = []protocol.ATBUS_CRYPTO_KDF_TYPE{cc.cryptoSelectKdfType}
+	} else {
+		selfPubKey.KdfType = slices.Clone(cc.supportedKDFTypes)
+	}
+	selfPubKey.Algorithms = slices.Clone(supportedCryptoAlgorithms)
+	selfPubKey.PublicKey = append([]byte{byte(len(pubKey))}, pubKey...)
+	if cc.writeCrypto.IsInitialized() {
+		selfPubKey.IvSize = cc.writeCrypto.IVSize
+		if cryptoAlgorithmIsAEAD(cc.writeCrypto.Algorithm) {
+			selfPubKey.TagSize = cc.writeCrypto.TagSize
+		} else {
+			selfPubKey.TagSize = 0
+		}
+	} else if cc.readCrypto.IsInitialized() {
+		selfPubKey.IvSize = cc.readCrypto.IVSize
+		selfPubKey.TagSize = 0
+	}
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -1673,7 +1767,8 @@ func (cc *ConnectionContext) GetHandshakeSequence() uint64 {
 	return cc.handshakeSequence
 }
 
-// UpdateCompressionAlgorithm updates the list of supported compression algorithms.
+// UpdateCompressionAlgorithm updates peer-supported compression algorithms, sorts them by
+// protocol priority, and selects the first locally supported algorithm (matching C++).
 func (cc *ConnectionContext) UpdateCompressionAlgorithm(
 	algorithms []protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE,
 ) error_code.ErrorType {
@@ -1686,6 +1781,16 @@ func (cc *ConnectionContext) UpdateCompressionAlgorithm(
 
 	cc.supportedCompressionAlgorithms = make([]protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE, len(algorithms))
 	copy(cc.supportedCompressionAlgorithms, algorithms)
+	slices.Sort(cc.supportedCompressionAlgorithms)
+
+	selected := protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE
+	for _, alg := range cc.supportedCompressionAlgorithms {
+		if compressionAlgorithmSupported(alg) {
+			selected = alg
+			break
+		}
+	}
+	_ = cc.compression.SetAlgorithm(selected)
 
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -1699,6 +1804,7 @@ func (cc *ConnectionContext) IsCompressionAlgorithmSupported(
 
 // SetupCryptoWithKey directly sets the encryption key and IV, skipping key exchange.
 // This is primarily used for testing purposes.
+// Mirrors C++ connection_context::setup_crypto_with_key.
 func (cc *ConnectionContext) SetupCryptoWithKey(
 	algorithm protocol.ATBUS_CRYPTO_ALGORITHM_TYPE, key []byte, iv []byte,
 ) error_code.ErrorType {
@@ -1709,6 +1815,13 @@ func (cc *ConnectionContext) SetupCryptoWithKey(
 		return error_code.EN_ATBUS_ERR_CHANNEL_CLOSING
 	}
 
+	if algorithm == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE {
+		cc.readCrypto = NewCryptoSession()
+		cc.writeCrypto = NewCryptoSession()
+		cc.cryptoSelectAlgorithm = protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE
+		return error_code.EN_ATBUS_ERR_SUCCESS
+	}
+
 	// Set up read crypto session
 	if err := cc.readCrypto.SetKey(key, iv, algorithm); err != nil {
 		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
@@ -1716,9 +1829,11 @@ func (cc *ConnectionContext) SetupCryptoWithKey(
 
 	// Set up write crypto session
 	if err := cc.writeCrypto.SetKey(key, iv, algorithm); err != nil {
+		cc.readCrypto = NewCryptoSession()
 		return error_code.EN_ATBUS_ERR_CRYPTO_HANDSHAKE_MAKE_SECRET
 	}
 
+	cc.cryptoSelectAlgorithm = algorithm
 	cc.handshakeDone = true
 	return error_code.EN_ATBUS_ERR_SUCCESS
 }
@@ -1753,6 +1868,28 @@ func allowCompress(messageType protocol.MessageBody_EnMessageTypeID, bodySize in
 	default:
 		return bodySize >= 2048
 	}
+}
+
+// userPayloadSize excludes protobuf framing from data and command payloads.
+func userPayloadSize(body *protocol.MessageBody, encodedSize int) int {
+	var commands *protocol.CustomCommandData
+	switch msg := body.GetMessageType().(type) {
+	case *protocol.MessageBody_DataTransformReq:
+		return len(msg.DataTransformReq.GetContent())
+	case *protocol.MessageBody_DataTransformRsp:
+		return len(msg.DataTransformRsp.GetContent())
+	case *protocol.MessageBody_CustomCommandReq:
+		commands = msg.CustomCommandReq
+	case *protocol.MessageBody_CustomCommandRsp:
+		commands = msg.CustomCommandRsp
+	default:
+		return encodedSize
+	}
+	size := 0
+	for _, arg := range commands.GetCommands() {
+		size += len(arg.GetArg())
+	}
+	return size
 }
 
 // PackMessage packs a Message into a StaticBufferBlock for transmission.
@@ -1791,7 +1928,9 @@ func (cc *ConnectionContext) PackMessage(m *types.Message, protocolVersion int32
 
 	// Check body size limits
 	if maxBodySize > 0 && bodySize > maxBodySize {
-		return nil, error_code.EN_ATBUS_ERR_INVALID_SIZE
+		if uint64(bodySize-maxBodySize) > types.ATBUS_MACRO_MAX_FRAME_HEADER || userPayloadSize(body, bodySize) > maxBodySize {
+			return nil, error_code.EN_ATBUS_ERR_INVALID_SIZE
+		}
 	}
 
 	// Set head fields
@@ -2005,7 +2144,7 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 	}
 
 	// Check max size early
-	if maxBodySize > 0 && len(input) > maxBodySize+256 { // 256 bytes for header overhead
+	if maxBodySize > 0 && uint64(len(input)) > uint64(maxBodySize)+types.ATBUS_MACRO_MAX_FRAME_HEADER {
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
 
@@ -2015,7 +2154,7 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
 
-	if int(headSize)+headVintSize > len(input) {
+	if headSize > uint64(len(input)-headVintSize) {
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
 
@@ -2030,7 +2169,7 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	}
 
-	if maxBodySize > 0 && int(bodySize) > maxBodySize+256 {
+	if bodySize > math.MaxInt || (maxBodySize > 0 && bodySize > uint64(maxBodySize)+types.ATBUS_MACRO_MAX_FRAME_HEADER) {
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
 
@@ -2067,6 +2206,9 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 				}
 				nextBlock = decrypted
 			} else {
+				if len(nextBlock) == 0 {
+					return error_code.EN_ATBUS_ERR_CRYPTO_DECRYPT
+				}
 				decrypted, err := cc.readCrypto.Decrypt(nextBlock)
 				if err != nil {
 					return error_code.EN_ATBUS_ERR_CRYPTO_DECRYPT
@@ -2083,8 +2225,8 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 			return error_code.EN_ATBUS_ERR_COMPRESSION_ALGORITHM_NOT_SUPPORT
 		}
 
-		compressedSize := int(compressionInfo.GetOriginalSize())
-		if compressedSize <= 0 || compressedSize > len(nextBlock) {
+		compressedSize := compressionInfo.GetOriginalSize()
+		if compressedSize == 0 || compressedSize > uint64(len(nextBlock)) {
 			return error_code.EN_ATBUS_ERR_INVALID_SIZE
 		}
 
@@ -2102,7 +2244,7 @@ func (cc *ConnectionContext) UnpackMessage(m *types.Message, input []byte, maxBo
 	}
 
 	// Parse body
-	if int(bodySize) > len(nextBlock) {
+	if bodySize > uint64(len(nextBlock)) {
 		return error_code.EN_ATBUS_ERR_INVALID_SIZE
 	}
 

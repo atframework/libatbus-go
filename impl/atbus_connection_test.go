@@ -18,7 +18,7 @@ func TestCreateConnectionInitializesAddressAndContext(t *testing.T) {
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
 	// Act
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 
 	// Assert
 	require.NotNil(t, conn)
@@ -34,7 +34,7 @@ func TestConnectionSetTemporarySetsTemporaryFlag(t *testing.T) {
 	ret := n.Init(0x3002, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	// Act
@@ -50,7 +50,7 @@ func TestConnectionIsRunningReflectsStatus(t *testing.T) {
 	ret := n.Init(0x3003, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	// Act + Assert
@@ -120,7 +120,7 @@ func TestConnectionPushTracksStartAndImmediateFailureStatistics(t *testing.T) {
 	ret := n.Init(0x3004, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	// Act
@@ -142,14 +142,14 @@ func TestOnIoStreamWrittenTracksSuccessfulWriteStatistics(t *testing.T) {
 	ret := n.Init(0x3005, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	ioConn := &connectionTestIoStreamConn{address: conn.GetAddress()}
 	ioConn.SetPrivateData(conn)
 
 	// Act
-	n.onIoStreamWritten(ioConn, int32(error_code.EN_ATBUS_ERR_SUCCESS), []byte("abcd"))
+	n.onIoStreamWritten(ioConn, int32(error_code.EN_ATBUS_ERR_SUCCESS), len("abcd"))
 
 	// Assert
 	assert.Equal(t, uint64(1), conn.GetStatistic().PushSuccessTimes)
@@ -164,14 +164,14 @@ func TestOnIoStreamWrittenTracksFailedWriteStatistics(t *testing.T) {
 	ret := n.Init(0x3006, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	ioConn := &connectionTestIoStreamConn{address: conn.GetAddress()}
 	ioConn.SetPrivateData(conn)
 
 	// Act
-	n.onIoStreamWritten(ioConn, int32(error_code.EN_ATBUS_ERR_WRITE_FAILED), []byte("de"))
+	n.onIoStreamWritten(ioConn, int32(error_code.EN_ATBUS_ERR_WRITE_FAILED), len("de"))
 
 	// Assert
 	assert.Equal(t, uint64(0), conn.GetStatistic().PushSuccessTimes)
@@ -186,7 +186,7 @@ func TestOnIoStreamReceivedTracksPullStatistics(t *testing.T) {
 	ret := n.Init(0x3007, nil)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 
 	ioConn := &connectionTestIoStreamConn{address: conn.GetAddress()}

@@ -134,8 +134,8 @@ This module aims for feature parity with C++ `libatbus`, with the following **in
 
 Go libatbus-go uses goroutines instead of a libuv event loop:
 
-- **Main goroutine**: Node event loop (`Proc()`), topology, GC, timer processing
-- **I/O goroutines**: Per-connection read/write loops (channel_io_stream)
+- **Node loop**: `Poll()` and `Proc()` dispatch queued connection and message events, including registration and topology updates. `Proc()` also advances timers. Call node state operations on this loop.
+- **I/O goroutines**: Per-connection read/write loops in `channel/io_stream` enqueue events for the node loop.
 - **Synchronization**: `sync.Mutex` is required on shared state:
   - `Endpoint` — protects `ctrlConn`, `dataConn`, `flags` (accessed from I/O goroutine disconnect callbacks and main loop GC)
   - `nodeEventTimer.pingList` — protects the LRU ping timer map (accessed from I/O goroutine disconnect callbacks and main loop `processPingTimers`)
@@ -170,7 +170,6 @@ go test -v -run "TestNodeRegParity" ./impl/
 | Dependency | Purpose |
 |------------|---------|
 | `github.com/atframework/atframe-utils-go` | Utility library (LRU map, algorithms) |
-| `github.com/spaolacci/murmur3` | Murmur3 hash |
 | `github.com/stretchr/testify` | Test assertions |
 | `golang.org/x/crypto` | ChaCha20, XXTEA, extended crypto |
 | `google.golang.org/protobuf` | Protobuf runtime |

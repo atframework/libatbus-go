@@ -30,7 +30,8 @@ type ConnectionContext interface {
 	// GetHandshakeStartTime returns the time when the handshake was started.
 	GetHandshakeStartTime() time.Time
 
-	// GetCryptoKeyExchangeAlgorithm returns the key exchange algorithm used for crypto handshake.
+	// GetCryptoKeyExchangeAlgorithm returns the selected key exchange algorithm configured for this context
+	// (ATBUS_CRYPTO_KEY_EXCHANGE_NONE when disabled or unsupported), matching C++ get_crypto_key_exchange_algorithm().
 	GetCryptoKeyExchangeAlgorithm() protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE
 
 	// GetCryptoSelectKdfType returns the KDF type selected during handshake.
@@ -39,7 +40,8 @@ type ConnectionContext interface {
 	// GetCryptoSelectAlgorithm returns the crypto algorithm selected during handshake.
 	GetCryptoSelectAlgorithm() protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
 
-	// GetCompressSelectAlgorithm returns the compression algorithm selected during handshake.
+	// GetCompressSelectAlgorithm returns the compression algorithm selected for this connection,
+	// matching C++ get_compression_select_algorithm().
 	GetCompressSelectAlgorithm() protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE
 
 	// GetNextSequence returns the next sequence number for message ordering.
@@ -109,7 +111,8 @@ type ConnectionContext interface {
 		selfPubKey *protocol.CryptoHandshakeData,
 		supportedCryptoAlgorithms []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE) ErrorType
 
-	// UpdateCompressionAlgorithm updates the list of supported compression algorithms.
+	// UpdateCompressionAlgorithm updates peer-supported compression algorithms, sorts them by
+	// protocol priority, and selects the first locally supported algorithm (matching C++).
 	//
 	// Returns error code, EN_ATBUS_ERR_SUCCESS on success.
 	UpdateCompressionAlgorithm(algorithm []protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE) ErrorType

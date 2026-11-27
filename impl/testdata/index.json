@@ -136,16 +136,6 @@
       "metadata": "enc_aes_256_gcm_custom_cmd.json"
     },
     {
-      "name": "enc_chacha20_poly1305_data_transform_req",
-      "binary": "enc_chacha20_poly1305_data_transform_req.bytes",
-      "metadata": "enc_chacha20_poly1305_data_transform_req.json"
-    },
-    {
-      "name": "enc_chacha20_poly1305_custom_cmd",
-      "binary": "enc_chacha20_poly1305_custom_cmd.bytes",
-      "metadata": "enc_chacha20_poly1305_custom_cmd.json"
-    },
-    {
       "name": "enc_chacha20_data_transform_req",
       "binary": "enc_chacha20_data_transform_req.bytes",
       "metadata": "enc_chacha20_data_transform_req.json"
@@ -154,6 +144,16 @@
       "name": "enc_chacha20_custom_cmd",
       "binary": "enc_chacha20_custom_cmd.bytes",
       "metadata": "enc_chacha20_custom_cmd.json"
+    },
+    {
+      "name": "enc_chacha20_poly1305_data_transform_req",
+      "binary": "enc_chacha20_poly1305_data_transform_req.bytes",
+      "metadata": "enc_chacha20_poly1305_data_transform_req.json"
+    },
+    {
+      "name": "enc_chacha20_poly1305_custom_cmd",
+      "binary": "enc_chacha20_poly1305_custom_cmd.bytes",
+      "metadata": "enc_chacha20_poly1305_custom_cmd.json"
     },
     {
       "name": "enc_xchacha20_poly1305_data_transform_req",

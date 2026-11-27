@@ -12,12 +12,17 @@ type (
 
 // CreateConnection creates a connection owned by the given node using the
 // default libatbus implementation. The owner should be created by NewNode or
-// CreateNode.
-func CreateConnection(owner Node, addr string) Connection {
+// CreateNode. An explicit mode normalizes the address immediately (true for
+// listening). Without a mode, Listen or Connect selects the address.
+func CreateConnection(owner Node, addr string, listenMode ...bool) Connection {
 	implOwner := unwrapNode(owner)
 	if implOwner == nil {
 		return nil
 	}
 
-	return libatbus_impl.CreateConnection(implOwner, addr)
+	conn := libatbus_impl.CreateConnection(implOwner, addr, listenMode...)
+	if conn == nil {
+		return nil
+	}
+	return conn
 }

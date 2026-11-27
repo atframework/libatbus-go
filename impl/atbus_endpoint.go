@@ -8,6 +8,7 @@ import (
 	"time"
 
 	channel_utility "github.com/atframework/libatbus-go/channel/utility"
+	protocol "github.com/atframework/libatbus-go/protocol"
 	types "github.com/atframework/libatbus-go/types"
 )
 
@@ -28,6 +29,11 @@ type Endpoint struct {
 	hostname string
 	hashCode string
 	owner    *Node
+
+	scope         string
+	namespaceName string
+	labels        map[string]string
+	gateways      []types.Gateway
 
 	flags uint32
 
@@ -154,6 +160,106 @@ func (e *Endpoint) UpdateHashCode(code string) {
 		return
 	}
 	e.hashCode = code
+}
+
+func (e *Endpoint) Reload(scope string, namespaceName string, labels map[string]string, gateways []types.Gateway) {
+	if e == nil {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.scope = scope
+	e.namespaceName = namespaceName
+	if len(labels) > 0 {
+		copiedLabels := make(map[string]string, len(labels))
+		for k, v := range labels {
+			copiedLabels[k] = v
+		}
+		e.labels = copiedLabels
+	} else {
+		e.labels = nil
+	}
+	e.gateways = types.CloneGateways(gateways)
+}
+
+func (e *Endpoint) ReloadFromProtocol(scope string, namespaceName string, labels map[string]string, channels []*protocol.ChannelData) {
+	if e == nil {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.scope = scope
+	e.namespaceName = namespaceName
+	if len(labels) > 0 {
+		copiedLabels := make(map[string]string, len(labels))
+		for k, v := range labels {
+			copiedLabels[k] = v
+		}
+		e.labels = copiedLabels
+	} else {
+		e.labels = nil
+	}
+
+	if len(channels) > 0 {
+		gateways := make([]types.Gateway, 0, len(channels))
+		for _, ch := range channels {
+			gateways = append(gateways, types.BuildGatewayFromChannelData(ch))
+		}
+		e.gateways = gateways
+	} else {
+		e.gateways = nil
+	}
+}
+
+func (e *Endpoint) GetScope() string {
+	if e == nil {
+		return ""
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.scope
+}
+
+func (e *Endpoint) GetNamespace() string {
+	if e == nil {
+		return ""
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.namespaceName
+}
+
+func (e *Endpoint) GetLabels() map[string]string {
+	if e == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.labels) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(e.labels))
+	for k, v := range e.labels {
+		copied[k] = v
+	}
+	return copied
+}
+
+func (e *Endpoint) GetGateway() []types.Gateway {
+	if e == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return types.CloneGateways(e.gateways)
 }
 
 func (e *Endpoint) AddConnection(conn types.Connection, forceData bool) bool {
@@ -549,7 +655,7 @@ func (e *Endpoint) SetStatisticUnfinishedPing(p uint64) {
 		return
 	}
 
-	e.stat.UnfinishedPing = p
+	atomic.StoreUint64(&e.stat.UnfinishedPing, p)
 }
 
 func (e *Endpoint) GetStatisticUnfinishedPing() uint64 {
@@ -557,7 +663,7 @@ func (e *Endpoint) GetStatisticUnfinishedPing() uint64 {
 		return 0
 	}
 
-	return e.stat.UnfinishedPing
+	return atomic.LoadUint64(&e.stat.UnfinishedPing)
 }
 
 func (e *Endpoint) SetStatisticPingDelay(pd time.Duration, pongTimepoint time.Time) {
@@ -565,8 +671,10 @@ func (e *Endpoint) SetStatisticPingDelay(pd time.Duration, pongTimepoint time.Ti
 		return
 	}
 
+	e.mu.Lock()
 	e.stat.PingDelay = pd
 	e.stat.LastPongTime = pongTimepoint
+	e.mu.Unlock()
 }
 
 func (e *Endpoint) GetStatisticPingDelay() time.Duration {
@@ -574,6 +682,8 @@ func (e *Endpoint) GetStatisticPingDelay() time.Duration {
 		return 0
 	}
 
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stat.PingDelay
 }
 
@@ -582,6 +692,8 @@ func (e *Endpoint) GetStatisticLastPong() time.Time {
 		return time.Time{}
 	}
 
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stat.LastPongTime
 }
 
@@ -590,16 +702,27 @@ func (e *Endpoint) GetStatisticCreatedTime() time.Time {
 		return time.Time{}
 	}
 
+	e.mu.Lock()
 	if !e.stat.CreatedTime.IsZero() {
-		return e.stat.CreatedTime
+		created := e.stat.CreatedTime
+		e.mu.Unlock()
+		return created
 	}
+	owner := e.owner
+	e.mu.Unlock()
 
-	if e.owner == nil {
+	if owner == nil {
 		return time.Time{}
 	}
 
-	e.stat.CreatedTime = e.owner.GetTimerTick()
-	return e.stat.CreatedTime
+	created := owner.GetTimerTick()
+	e.mu.Lock()
+	if e.stat.CreatedTime.IsZero() {
+		e.stat.CreatedTime = created
+	}
+	res := e.stat.CreatedTime
+	e.mu.Unlock()
+	return res
 }
 
 func (e *Endpoint) GetStatisticPushStartTimes() uint64 {

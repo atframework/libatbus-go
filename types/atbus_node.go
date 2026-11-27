@@ -233,14 +233,19 @@ type Node interface {
 	ReloadCompression(compressionAllowAlgorithms []protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE,
 		compressionLevel protocol.ATBUS_COMPRESSION_LEVEL) ErrorType
 
+	ReloadSelfEndpoint(scope string, namespaceName string, labels map[string]string, gateways []Gateway)
+
 	Start() ErrorType
 
 	StartWithConfigure(conf *StartConfigure) ErrorType
 
 	Reset() ErrorType
 
+	// Proc 派发已排队的 I/O 事件，并处理定时器、自发消息和资源回收。
+	// 在同一个事件循环中调用 Proc、Poll 和节点状态操作。
 	Proc(now time.Time) (int32, ErrorType)
 
+	// Poll 派发已排队的 I/O 事件和自发消息，并处理资源回收。
 	Poll() (int32, ErrorType)
 
 	Listen(address string) ErrorType
@@ -494,11 +499,25 @@ type Node interface {
 
 	SetHostname(hostname string, force bool) bool
 
+	GetSelfHostname() string
+
+	SetSelfHostname(hostname string)
+
+	GetSelfPid() int32
+
+	SetSelfPid(pid int32)
+
 	GetProtocolVersion() int32
 
 	GetProtocolMinimalVersion() int32
 
 	GetListenList() []ChannelAddress
+
+	GetGatewayAddress() []Gateway
+
+	GetConnectionTimerSize() int
+
+	DumpListenToChannelData(listenAddress string, ch *protocol.ChannelData)
 
 	// ================= statistic functions =================
 	AddStatisticDispatchTimes()

@@ -949,8 +949,12 @@ func (_ *ChannelData) GetTypeID() lu.TypeID {
 
 // ===== Readonly wrapper for ChannelData ===== Message ====
 type Readonly_ChannelData struct {
-	protoData    *ChannelData
-	fieldAddress string
+	protoData            *ChannelData
+	fieldAddress         string
+	fieldMatchScope      string
+	fieldMatchHosts      []string
+	fieldMatchNamespaces []string
+	fieldMatchLabels     map[string]string
 }
 
 func (r *Readonly_ChannelData) ReadonlyProtoReflect() innerFile_libatbus_protocol_protoReadonlyMessage {
@@ -990,6 +994,30 @@ func (r *Readonly_ChannelData) initFromProto(src *ChannelData) {
 		return
 	}
 	r.fieldAddress = src.GetAddress()
+	r.fieldMatchScope = src.GetMatchScope()
+	if v := src.GetMatchHosts(); len(v) != 0 {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		r.fieldMatchHosts = copied
+	} else {
+		r.fieldMatchHosts = nil
+	}
+	if v := src.GetMatchNamespaces(); len(v) != 0 {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		r.fieldMatchNamespaces = copied
+	} else {
+		r.fieldMatchNamespaces = nil
+	}
+	if v := src.GetMatchLabels(); len(v) != 0 {
+		copied := make(map[string]string, len(v))
+		for mk, mv := range v {
+			copied[mk] = mv
+		}
+		r.fieldMatchLabels = copied
+	} else {
+		r.fieldMatchLabels = nil
+	}
 }
 
 func (r *Readonly_ChannelData) GetAddress() string {
@@ -998,6 +1026,148 @@ func (r *Readonly_ChannelData) GetAddress() string {
 		return zero
 	}
 	return r.fieldAddress
+}
+
+func (r *Readonly_ChannelData) GetMatchScope() string {
+	if r == nil {
+		var zero string
+		return zero
+	}
+	return r.fieldMatchScope
+}
+
+func (r *Readonly_ChannelData) GetMatchHosts() []string {
+	if r == nil {
+		var zero []string
+		return zero
+	}
+	return r.fieldMatchHosts
+}
+
+func (r *Readonly_ChannelData) GetMatchNamespaces() []string {
+	if r == nil {
+		var zero []string
+		return zero
+	}
+	return r.fieldMatchNamespaces
+}
+
+func (r *Readonly_ChannelData) GetMatchLabels() map[string]string {
+	if r == nil {
+		var zero map[string]string
+		return zero
+	}
+	return r.fieldMatchLabels
+}
+
+// ===== Mutable methods for ChannelData ===== Repeated =====
+func (m *ChannelData) MutableMatchHosts() []string {
+	if m.MatchHosts == nil {
+		m.MatchHosts = []string{}
+	}
+	return m.MatchHosts
+}
+
+// ===== ReverseIfNil methods for ChannelData ===== Repeated =====
+func (m *ChannelData) ReverseIfNilMatchHosts(l int) []string {
+	if m.MatchHosts == nil {
+		m.MatchHosts = make([]string, 0, l)
+	}
+	return m.MatchHosts
+}
+
+// ===== Append methods for ChannelData ===== Repeated =====
+func (m *ChannelData) AppendMatchHosts(d string) {
+	if m.MatchHosts == nil {
+		m.MatchHosts = []string{}
+	}
+	m.MatchHosts = append(m.MatchHosts, d)
+}
+
+// ===== Append methods for ChannelData ===== Repeated =====
+func (m *ChannelData) AppendAndReverseMatchHosts(l int, d string) {
+	if m.MatchHosts == nil {
+		m.MatchHosts = make([]string, 0, l)
+	}
+	m.MatchHosts = append(m.MatchHosts, d)
+}
+
+// ===== Merge methods for ChannelData ===== Repeated =====
+func (m *ChannelData) MergeMatchHosts(d []string) []string {
+	if m.MatchHosts == nil {
+		m.MatchHosts = []string{}
+	}
+	m.MatchHosts = append(m.MatchHosts, d...)
+	return m.MatchHosts
+}
+
+// ===== RemoveLast methods for ChannelData ===== Repeated =====
+func (m *ChannelData) RemoveLastMatchHosts() {
+	if m.MatchHosts == nil {
+		m.MatchHosts = []string{}
+	}
+	if len(m.MatchHosts) != 0 {
+		m.MatchHosts = m.MatchHosts[:len(m.MatchHosts)-1]
+	}
+}
+
+// ===== Mutable methods for ChannelData ===== Repeated =====
+func (m *ChannelData) MutableMatchNamespaces() []string {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = []string{}
+	}
+	return m.MatchNamespaces
+}
+
+// ===== ReverseIfNil methods for ChannelData ===== Repeated =====
+func (m *ChannelData) ReverseIfNilMatchNamespaces(l int) []string {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = make([]string, 0, l)
+	}
+	return m.MatchNamespaces
+}
+
+// ===== Append methods for ChannelData ===== Repeated =====
+func (m *ChannelData) AppendMatchNamespaces(d string) {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = []string{}
+	}
+	m.MatchNamespaces = append(m.MatchNamespaces, d)
+}
+
+// ===== Append methods for ChannelData ===== Repeated =====
+func (m *ChannelData) AppendAndReverseMatchNamespaces(l int, d string) {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = make([]string, 0, l)
+	}
+	m.MatchNamespaces = append(m.MatchNamespaces, d)
+}
+
+// ===== Merge methods for ChannelData ===== Repeated =====
+func (m *ChannelData) MergeMatchNamespaces(d []string) []string {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = []string{}
+	}
+	m.MatchNamespaces = append(m.MatchNamespaces, d...)
+	return m.MatchNamespaces
+}
+
+// ===== RemoveLast methods for ChannelData ===== Repeated =====
+func (m *ChannelData) RemoveLastMatchNamespaces() {
+	if m.MatchNamespaces == nil {
+		m.MatchNamespaces = []string{}
+	}
+	if len(m.MatchNamespaces) != 0 {
+		m.MatchNamespaces = m.MatchNamespaces[:len(m.MatchNamespaces)-1]
+	}
+}
+
+// ===== Mutable methods for ChannelData ===== Map =====
+func (m *ChannelData) MutableMatchLabels() map[string]string {
+	if m.MatchLabels == nil {
+		m.MatchLabels = make(map[string]string, 0)
+	}
+	return m.MatchLabels
 }
 
 // ===== Clone methods for PingData ===== Message ====
@@ -1140,6 +1310,9 @@ type Readonly_RegisterData struct {
 	fieldAccessKey                     *Readonly_AccessData
 	fieldHashCode                      string
 	fieldCryptoHandshake               *Readonly_CryptoHandshakeData
+	fieldScope                         string
+	fieldNamespaceName                 string
+	fieldLabels                        map[string]string
 }
 
 func (r *Readonly_RegisterData) ReadonlyProtoReflect() innerFile_libatbus_protocol_protoReadonlyMessage {
@@ -1219,6 +1392,17 @@ func (r *Readonly_RegisterData) initFromProto(src *RegisterData) {
 		r.fieldCryptoHandshake = v.ToReadonly()
 	} else {
 		r.fieldCryptoHandshake = nil
+	}
+	r.fieldScope = src.GetScope()
+	r.fieldNamespaceName = src.GetNamespaceName()
+	if v := src.GetLabels(); len(v) != 0 {
+		copied := make(map[string]string, len(v))
+		for mk, mv := range v {
+			copied[mk] = mv
+		}
+		r.fieldLabels = copied
+	} else {
+		r.fieldLabels = nil
 	}
 }
 
@@ -1300,6 +1484,30 @@ func (r *Readonly_RegisterData) GetCryptoHandshake() *Readonly_CryptoHandshakeDa
 		return zero
 	}
 	return r.fieldCryptoHandshake
+}
+
+func (r *Readonly_RegisterData) GetScope() string {
+	if r == nil {
+		var zero string
+		return zero
+	}
+	return r.fieldScope
+}
+
+func (r *Readonly_RegisterData) GetNamespaceName() string {
+	if r == nil {
+		var zero string
+		return zero
+	}
+	return r.fieldNamespaceName
+}
+
+func (r *Readonly_RegisterData) GetLabels() map[string]string {
+	if r == nil {
+		var zero map[string]string
+		return zero
+	}
+	return r.fieldLabels
 }
 
 // ===== Mutable methods for RegisterData ===== Repeated =====
@@ -1479,6 +1687,14 @@ func (m *RegisterData) MutableCryptoHandshake() *CryptoHandshakeData {
 		m.CryptoHandshake = new(CryptoHandshakeData)
 	}
 	return m.CryptoHandshake
+}
+
+// ===== Mutable methods for RegisterData ===== Map =====
+func (m *RegisterData) MutableLabels() map[string]string {
+	if m.Labels == nil {
+		m.Labels = make(map[string]string, 0)
+	}
+	return m.Labels
 }
 
 // ===== Clone methods for HandshakeConfirmData ===== Message ====

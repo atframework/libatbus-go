@@ -22,15 +22,12 @@ func TestCalculateHashEmptyPayload(t *testing.T) {
 
 // TestCalculateHashNonEmptyPayload verifies that hash calculation produces consistent results
 func TestCalculateHashNonEmptyPayload(t *testing.T) {
-	// Arrange
-	payload := []byte("Hello, atbus!")
-
-	// Act
-	hash1 := CalculateHash(payload)
-	hash2 := CalculateHash(payload)
-
-	// Assert
-	assert.Equal(t, hash1, hash2, "same payload should produce same hash")
+	for input, want := range map[string]uint32{
+		"foo": 0xf6a5c420, "abcd": 0x43ed676a, "hello": 0x248bfa47, "foobar": 0xa4c4d4bd,
+	} {
+		data := append([]byte{0}, input...)
+		assert.Equal(t, want, CalculateHash(data[1:]), "input %q", input)
+	}
 }
 
 // TestPackFrameBasic verifies basic frame packing functionality

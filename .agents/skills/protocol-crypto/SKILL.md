@@ -13,12 +13,12 @@ Protobuf v3 definition: `protocol/libatbus_protocol.proto`
 
 - **message_head** — version, type, sequence, source_bus_id, crypto metadata, compression metadata, body_size
 - **message_body** — oneof: `custom_command_req/rsp`, `data_transform_req/rsp`, `node_register_req/rsp`, `node_ping_req`, `node_pong_rsp`, `handshake_confirm`
-- **register_data** — bus_id, pid, hostname, channels, supported schemas/compression, access_key, crypto_handshake
+- **register_data** — bus_id, pid, hostname, channels (`channel_data` with `match_scope`, `match_hosts`, `match_namespaces`, `match_labels`), supported schemas/compression, access_key, crypto_handshake, scope, namespace_name, labels
 - **forward_data** — from, to, router path, content, flags (REQUIRE_RSP)
 - **ping_data** — time_point, crypto_handshake (carries ECDH public key)
 - **crypto_handshake_data** — sequence, key exchange type, KDF types, cipher algorithms, public_key, iv_size, tag_size
 
-Protocol version: `ATBUS_PROTOCOL_VERSION = 3`, minimum: `ATBUS_PROTOCOL_MINIMAL_VERSION = 3`.
+Protocol version: `ATBUS_PROTOCOL_VERSION = 5`, minimum: `ATBUS_PROTOCOL_MINIMAL_VERSION = 5`.
 
 ### Frame Encoding
 
@@ -114,7 +114,7 @@ Key parity areas:
 
 - ECDH shared secret derivation
 - HKDF-SHA256 key expansion
-- XXTEA block encryption (padding scheme)
+- XXTEA block encryption (8-byte block alignment padding; exact multiples of 8 add 0 bytes)
 - Pure ChaCha20 stream cipher (no AEAD)
 - All AEAD ciphers (nonce + ciphertext + tag format)
 - All compression algorithms (dictionary-less mode)

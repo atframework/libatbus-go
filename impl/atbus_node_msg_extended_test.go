@@ -267,7 +267,7 @@ func TestNodeMsgParity_TransferFailed(t *testing.T) {
 	// Register topology: fake peers that don't actually exist
 	for _, n := range []*Node{&upstream, &ds1} {
 		n.GetTopologyRegistry().UpdatePeer(ds1.GetId(), upstream.GetId(), nil)
-		n.GetTopologyRegistry().UpdatePeer(0x12346890, upstream.GetId(), nil)  // non-existent downstream
+		n.GetTopologyRegistry().UpdatePeer(0x12346890, upstream.GetId(), nil) // non-existent downstream
 		n.GetTopologyRegistry().UpdatePeer(0x12356789, 0, nil)                // non-existent brother
 	}
 
@@ -501,9 +501,11 @@ func testEncryptedMessageBetweenPeerNodes(t *testing.T, kex protocol.ATBUS_CRYPT
 	// Set up receiver
 	receivedCount := 0
 	var receivedData []byte
-	node2.SetEventHandleOnForwardRequest(func(_ types.Node, _ types.Endpoint, _ types.Connection, _ *types.Message, content []byte) error_code.ErrorType {
+	var receivedCipher protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
+	node2.SetEventHandleOnForwardRequest(func(_ types.Node, _ types.Endpoint, _ types.Connection, message *types.Message, content []byte) error_code.ErrorType {
 		receivedCount++
 		receivedData = append([]byte(nil), content...)
+		receivedCipher = message.GetHead().GetCrypto().GetAlgorithm()
 		return error_code.EN_ATBUS_ERR_SUCCESS
 	})
 
@@ -524,7 +526,7 @@ func testEncryptedMessageBetweenPeerNodes(t *testing.T, kex protocol.ATBUS_CRYPT
 		return false
 	}
 
-	return true
+	return assert.Equal(t, ciphers[0], receivedCipher, "data frame must use the negotiated cipher")
 }
 
 // TestNodeMsgParity_CryptoConfigKeyExchangeAlgorithms mirrors C++ atbus_node_msg::crypto_config_key_exchange_algorithms.

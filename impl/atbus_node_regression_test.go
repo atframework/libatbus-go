@@ -58,6 +58,45 @@ func TestReloadCompression_ReturnsSuccessOnValidInput(t *testing.T) {
 	assert.Equal(t, protocol.ATBUS_COMPRESSION_LEVEL_ATBUS_COMPRESSION_LEVEL_FAST, n.configure.CompressionLevel)
 }
 
+func TestPollDispatchesQueuedSelfMessageAndIgnoresWriteNotifications(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	calls := 0
+	n.SetEventHandleOnForwardRequest(func(types.Node, types.Endpoint, types.Connection, *types.Message, []byte) types.ErrorType {
+		calls++
+		return 0
+	})
+	n.SetEventHandleOnAvailable(func(node types.Node, _ types.ErrorType) types.ErrorType {
+		return node.SendData(node.GetId(), 1, []byte("self"))
+	})
+	require.Zero(t, n.Start())
+	require.Zero(t, calls)
+	n.ioStreamEvents <- nodeIoStreamEvent{kind: types.IoStreamCallbackEventType_Written}
+	count, code := n.Poll()
+	require.Zero(t, code)
+	assert.EqualValues(t, 1, count)
+	assert.Equal(t, 1, calls)
+	assert.False(t, n.CheckFlag(types.NodeFlag_InGcConnections))
+}
+
+func TestEndpointGCCancelsPingTimer(t *testing.T) {
+	n := NewNode()
+	require.Zero(t, n.Init(1, nil))
+	t.Cleanup(func() { n.Reset() })
+	require.Zero(t, n.Start())
+	ep := CreateEndpoint(n, 2, int64(n.GetSelfPid()), n.GetSelfHostname())
+	require.Zero(t, n.AddEndpoint(ep))
+	require.True(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+	now := ep.GetStatisticCreatedTime().Add(n.configure.FirstIdleTimeout + n.configure.PingInterval + time.Second)
+	n.Proc(now)
+	assert.Nil(t, n.GetEndpoint(2))
+	assert.False(t, ep.GetFlag(types.EndpointFlag_HasPingTimer))
+	assert.Zero(t, n.eventTimer.pingList.Len())
+	n.Proc(now.Add(n.configure.PingInterval + time.Second))
+	assert.Zero(t, n.eventTimer.pingList.Len())
+}
+
 func TestReloadCompression_NilReceiverReturnsParams(t *testing.T) {
 	var n *Node
 	ret := n.ReloadCompression(nil, protocol.ATBUS_COMPRESSION_LEVEL_ATBUS_COMPRESSION_LEVEL_FAST)

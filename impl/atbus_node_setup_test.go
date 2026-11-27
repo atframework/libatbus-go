@@ -10,7 +10,9 @@ package libatbus_impl
 import (
 	"os"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -183,9 +185,10 @@ func TestNodeSetupParity_CompressionAlgorithms(t *testing.T) {
 		types.ParseCompressionAlgorithmName("gzip"),
 	)
 
-	// Note: In Go, NONE compression returns true from the support check delegate
-	// (the underlying compression library treats NONE as a pass-through).
-	// This is not a divergence from C++ behavior for practical purposes.
+	// Mirrors C++ connection_context::is_compression_algorithm_supported(NONE) == false.
+	assert.False(t, types.IsCompressionAlgorithmSupported(
+		protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE,
+	))
 }
 
 // TestNodeSetupParity_KeyExchangeAlgorithms verifies the key exchange algorithm
@@ -255,4 +258,281 @@ func TestNodeSetupParity_ReloadCryptoAppliesConfig(t *testing.T) {
 	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 	assert.Equal(t, protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE,
 		n.GetCryptoKeyExchangeType())
+}
+
+// TestNodeSetupParity_ResetConnectionAfterLoopbackRedirect mirrors C++
+// atbus_node_setup::reset_connection_after_loopback_redirect.
+func TestNodeSetupParity_ResetConnectionAfterLoopbackRedirect(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+	t.Cleanup(func() { node.Reset() })
+
+	unusedAddr := strings.Replace(reserveTCPListenAddress(t), "ipv4://127.0.0.1:", "atcp://0.0.0.0:", 1)
+	conn := CreateConnection(node, unusedAddr, false)
+	require.NotNil(t, conn)
+	assert.Equal(t, unusedAddr, conn.GetOriginAddress())
+	assert.Equal(t, "127.0.0.1", conn.GetAddress().GetHost())
+	assert.Equal(t, 1, node.GetConnectionTimerSize())
+
+	_ = conn.Connect()
+	conn.Reset()
+	assert.Equal(t, 0, node.GetConnectionTimerSize())
+}
+
+// TestNodeSetupParity_ResetNodeWithPendingLoopbackRedirectConnection mirrors C++
+// atbus_node_setup::reset_node_with_pending_loopback_redirect_connection.
+func TestNodeSetupParity_ResetNodeWithPendingLoopbackRedirectConnection(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+
+	unusedAddr := strings.Replace(reserveTCPListenAddress(t), "ipv4://127.0.0.1:", "atcp://0.0.0.0:", 1)
+	conn := CreateConnection(node, unusedAddr, false)
+	require.NotNil(t, conn)
+	assert.Equal(t, 1, node.GetConnectionTimerSize())
+
+	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Reset())
+	assert.Equal(t, 0, node.GetConnectionTimerSize())
+}
+
+// TestNodeSetupParity_ReconnectAfterFailedLoopbackRedirectConnect mirrors C++
+// atbus_node_setup::reconnect_after_failed_loopback_redirect_connect.
+func TestNodeSetupParity_ReconnectAfterFailedLoopbackRedirectConnect(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+	t.Cleanup(func() { node.Reset() })
+
+	unusedAddr := strings.Replace(reserveTCPListenAddress(t), "ipv4://127.0.0.1:", "atcp://0.0.0.0:", 1)
+	conn := CreateConnection(node, unusedAddr, false)
+	require.NotNil(t, conn)
+
+	// Go dials synchronously: connecting to an unlistened port fails immediately and cleans up the timer.
+	ret := conn.Connect()
+	assert.NotEqual(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
+	assert.Equal(t, types.ConnectionState_Disconnected, conn.GetStatus())
+	assert.Equal(t, 0, node.GetConnectionTimerSize())
+
+	// Subsequent node.Connect must not be swallowed by a stale connecting_list_by_channel entry:
+	// it must actually attempt a dial (returning connect error) and leave timer list empty.
+	ret = node.Connect(unusedAddr)
+	assert.NotEqual(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
+	assert.Equal(t, 0, node.GetConnectionTimerSize())
+}
+
+// TestNodeSetupParity_CreateConnectionWithDuplicatedAddress mirrors C++
+// atbus_node_setup::create_connection_with_duplicated_address.
+func TestNodeSetupParity_CreateConnectionWithDuplicatedAddress(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+	t.Cleanup(func() { node.Reset() })
+
+	addr := reserveTCPListenAddress(t)
+	wildcardAddr := strings.Replace(addr, "ipv4://127.0.0.1:", "ipv4://0.0.0.0:", 1)
+	conn1 := CreateConnection(node, wildcardAddr, false)
+	require.NotNil(t, conn1)
+	assert.Equal(t, 1, node.GetConnectionTimerSize())
+
+	conn2 := CreateConnection(node, wildcardAddr, false)
+	require.NotNil(t, conn2)
+	assert.Equal(t, 2, node.GetConnectionTimerSize())
+
+	// 已有同地址未完成连接时, node.Connect 去重, 不再发起新连接
+	assert.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Connect(wildcardAddr))
+	assert.Equal(t, 2, node.GetConnectionTimerSize())
+
+	// 两个连接必须能互不影响地移除
+	conn1.Reset()
+	assert.Equal(t, 1, node.GetConnectionTimerSize())
+
+	conn2.Reset()
+	assert.Equal(t, 0, node.GetConnectionTimerSize())
+}
+
+// TestNodeSetupParity_UpstreamTopologyWithWildcardUpstreamAddress mirrors C++
+// atbus_node_setup::upstream_topology_with_wildcard_upstream_address.
+func TestNodeSetupParity_UpstreamTopologyWithWildcardUpstreamAddress(t *testing.T) {
+	listenAddr := reserveTCPListenAddress(t)
+	wildcardAddr := strings.Replace(listenAddr, "ipv4://127.0.0.1:", "ipv4://0.0.0.0:", 1)
+
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+
+	node1 := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Init(0x12345678, &conf))
+	t.Cleanup(func() { node1.Reset() })
+
+	var confUpstream types.NodeConfigure
+	types.SetDefaultNodeConfigure(&confUpstream)
+	confUpstream.UpstreamAddress = wildcardAddr
+	node2 := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node2.Init(0x12356789, &confUpstream))
+	t.Cleanup(func() { node2.Reset() })
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Listen(listenAddr))
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node1.Start())
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node2.Start())
+
+	waitForNodeCondition(t, 8*time.Second, func() bool {
+		upstream := node2.GetUpstreamEndpoint()
+		return upstream != nil && upstream.GetId() == node1.GetId() &&
+			node2.GetSelfEndpoint().GetCtrlConnection(upstream) != nil
+	}, node1, node2)
+
+	upstream := node2.GetUpstreamEndpoint()
+	require.NotNil(t, upstream)
+	conn := node2.GetSelfEndpoint().GetCtrlConnection(upstream)
+	require.NotNil(t, conn)
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node2.Reset())
+	assert.Equal(t, types.ConnectionState_Disconnected, conn.GetStatus())
+	assert.Nil(t, conn.GetBinding())
+}
+
+// TestNodeSetupParity_GatewayConfCopyAndDefault mirrors C++
+// atbus_node_setup::gateway_conf_copy_and_default.
+func TestNodeSetupParity_GatewayConfCopyAndDefault(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	assert.Equal(t, 60*time.Second, conf.MaxRetryInterval)
+
+	gw := types.Gateway{
+		Address:         "ipv4://127.0.0.1:16450",
+		MatchScope:      "prod",
+		MatchHosts:      map[string]struct{}{"host-a": {}},
+		MatchNamespaces: map[string]struct{}{"game": {}},
+		MatchLabels:     map[string]string{"zone": "a"},
+	}
+	conf.Scope = "prod"
+	conf.NamespaceName = "game"
+	conf.NodeLabels = map[string]string{"zone": "a"}
+	conf.Gateway = []types.Gateway{gw}
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+	t.Cleanup(func() { node.Reset() })
+
+	// Mutating source conf must not affect initialized node copy
+	conf.Gateway[0].Address = "ipv4://127.0.0.1:19999"
+	conf.Gateway[0].MatchLabels["zone"] = "mutated"
+	conf.NodeLabels["zone"] = "mutated"
+
+	nodeGateways := node.GetGatewayAddress()
+	require.Len(t, nodeGateways, 1)
+	assert.Equal(t, "ipv4://127.0.0.1:16450", nodeGateways[0].Address)
+	assert.Equal(t, "prod", nodeGateways[0].MatchScope)
+	assert.Equal(t, map[string]struct{}{"host-a": {}}, nodeGateways[0].MatchHosts)
+	assert.Equal(t, map[string]struct{}{"game": {}}, nodeGateways[0].MatchNamespaces)
+	assert.Equal(t, map[string]string{"zone": "a"}, nodeGateways[0].MatchLabels)
+	assert.Equal(t, "a", node.GetConfigure().NodeLabels["zone"])
+
+	// 复用 NodeConfigure 时 SetDefaultNodeConfigure 必须清掉旧的隔离配置
+	types.SetDefaultNodeConfigure(&conf)
+	assert.Empty(t, conf.Scope)
+	assert.Empty(t, conf.NamespaceName)
+	assert.Empty(t, conf.NodeLabels)
+	assert.Empty(t, conf.Gateway)
+	assert.Equal(t, 60*time.Second, conf.MaxRetryInterval)
+}
+
+// TestNodeSetupParity_GatewayChannelDataRoundtrip mirrors C++
+// atbus_node_setup::gateway_channel_data_roundtrip.
+func TestNodeSetupParity_GatewayChannelDataRoundtrip(t *testing.T) {
+	gw := types.Gateway{
+		Address:         "ipv4://127.0.0.1:16450",
+		MatchScope:      "prod",
+		MatchHosts:      map[string]struct{}{"host-a": {}, "host-b": {}},
+		MatchNamespaces: map[string]struct{}{"game": {}},
+		MatchLabels:     map[string]string{"zone": "a", "app": "x"},
+	}
+
+	chanData := &protocol.ChannelData{}
+	types.DumpGatewayToChannelData(gw, chanData)
+	assert.Equal(t, gw.Address, chanData.GetAddress())
+	assert.Equal(t, gw.MatchScope, chanData.GetMatchScope())
+	assert.Len(t, chanData.GetMatchHosts(), 2)
+	assert.Len(t, chanData.GetMatchNamespaces(), 1)
+	assert.Len(t, chanData.GetMatchLabels(), 2)
+
+	restored := types.BuildGatewayFromChannelData(chanData)
+	assert.Equal(t, gw.Address, restored.Address)
+	assert.Equal(t, gw.MatchScope, restored.MatchScope)
+	assert.Equal(t, gw.MatchHosts, restored.MatchHosts)
+	assert.Equal(t, gw.MatchNamespaces, restored.MatchNamespaces)
+	assert.Equal(t, gw.MatchLabels, restored.MatchLabels)
+
+	// 未配置任何匹配规则的地址对所有对端可达
+	wildcardChan := &protocol.ChannelData{Address: "ipv4://127.0.0.1:16451"}
+	wildcardGw := types.BuildGatewayFromChannelData(wildcardChan)
+	assert.Equal(t, "ipv4://127.0.0.1:16451", wildcardGw.Address)
+	assert.Empty(t, wildcardGw.MatchScope)
+	assert.Empty(t, wildcardGw.MatchHosts)
+	assert.Empty(t, wildcardGw.MatchNamespaces)
+	assert.Empty(t, wildcardGw.MatchLabels)
+}
+
+// TestNodeSetupParity_DumpListenToChannelData mirrors C++
+// atbus_node_setup::dump_listen_to_channel_data.
+func TestNodeSetupParity_DumpListenToChannelData(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	conf.Scope = "prod"
+	conf.NamespaceName = "game"
+
+	node := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, &conf))
+	t.Cleanup(func() { node.Reset() })
+
+	chanData := &protocol.ChannelData{}
+	node.DumpListenToChannelData("ipv4://127.0.0.1:16450", chanData)
+	assert.Equal(t, "ipv4://127.0.0.1:16450", chanData.GetAddress())
+	assert.Equal(t, "prod", chanData.GetMatchScope())
+	assert.Equal(t, []string{"game"}, chanData.GetMatchNamespaces())
+	assert.Empty(t, chanData.GetMatchHosts())
+	assert.Empty(t, chanData.GetMatchLabels())
+
+	var wildcardConf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&wildcardConf)
+	wildcardNode := NewNode()
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, wildcardNode.Init(0x12345679, &wildcardConf))
+	t.Cleanup(func() { wildcardNode.Reset() })
+
+	wildcardChan := &protocol.ChannelData{}
+	wildcardNode.DumpListenToChannelData("ipv4://127.0.0.1:16450", wildcardChan)
+	assert.Equal(t, "ipv4://127.0.0.1:16450", wildcardChan.GetAddress())
+	assert.Empty(t, wildcardChan.GetMatchScope())
+	assert.Empty(t, wildcardChan.GetMatchNamespaces())
+}
+
+// TestNodeSetupParity_MessageSequenceAllocatorAndSelfIdentity verifies
+// C++ node constructor message_sequence_allocator_ offset and per-node self hostname/pid overrides.
+func TestNodeSetupParity_MessageSequenceAllocatorAndSelfIdentity(t *testing.T) {
+	node := NewNode()
+	seq1 := node.AllocateMessageSequence()
+	seq2 := node.AllocateMessageSequence()
+	assert.Greater(t, seq1, uint64(0))
+	assert.Equal(t, seq1+1, seq2)
+
+	// Per-node identity falls back to process global defaults until overridden
+	assert.Equal(t, node.GetHostname(), node.GetSelfHostname())
+	assert.Equal(t, int32(node.GetPid()), node.GetSelfPid())
+
+	node.SetSelfHostname("custom-node-host")
+	node.SetSelfPid(42424)
+	assert.Equal(t, "custom-node-host", node.GetSelfHostname())
+	assert.Equal(t, int32(42424), node.GetSelfPid())
+
+	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, node.Init(0x12345678, nil))
+	t.Cleanup(func() { node.Reset() })
+	assert.Equal(t, "custom-node-host", node.GetSelfEndpoint().GetHostname())
+	assert.Equal(t, int32(42424), node.GetSelfEndpoint().GetPid())
 }

@@ -2,6 +2,7 @@ package libatbus_types
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	buffer "github.com/atframework/libatbus-go/buffer"
@@ -17,6 +18,132 @@ const (
 	ATBUS_MACRO_MAX_FRAME_HEADER uint64 = 4096 // 最大数据包头长度
 )
 
+// Gateway describes an advertised gateway channel address and its peer reachability rules.
+// Matches C++ channel::gateway_t / node::gateway_t.
+type Gateway struct {
+	Address         string
+	MatchScope      string
+	MatchHosts      map[string]struct{}
+	MatchNamespaces map[string]struct{}
+	MatchLabels     map[string]string
+}
+
+// CloneGateway returns a deep copy of a Gateway struct.
+func CloneGateway(gw Gateway) Gateway {
+	cloned := Gateway{
+		Address:    gw.Address,
+		MatchScope: gw.MatchScope,
+	}
+	if len(gw.MatchHosts) > 0 {
+		cloned.MatchHosts = make(map[string]struct{}, len(gw.MatchHosts))
+		for k := range gw.MatchHosts {
+			cloned.MatchHosts[k] = struct{}{}
+		}
+	}
+	if len(gw.MatchNamespaces) > 0 {
+		cloned.MatchNamespaces = make(map[string]struct{}, len(gw.MatchNamespaces))
+		for k := range gw.MatchNamespaces {
+			cloned.MatchNamespaces[k] = struct{}{}
+		}
+	}
+	if len(gw.MatchLabels) > 0 {
+		cloned.MatchLabels = make(map[string]string, len(gw.MatchLabels))
+		for k, v := range gw.MatchLabels {
+			cloned.MatchLabels[k] = v
+		}
+	}
+	return cloned
+}
+
+// CloneGateways returns a deep copy of a Gateway slice.
+func CloneGateways(gateways []Gateway) []Gateway {
+	if len(gateways) == 0 {
+		return nil
+	}
+	cloned := make([]Gateway, len(gateways))
+	for i, gw := range gateways {
+		cloned[i] = CloneGateway(gw)
+	}
+	return cloned
+}
+
+// BuildGatewayFromChannelData converts protobuf protocol.ChannelData to Gateway.
+// Matches C++ node::build_gateway_from_channel_data.
+func BuildGatewayFromChannelData(ch *protocol.ChannelData) Gateway {
+	var gw Gateway
+	if ch == nil {
+		return gw
+	}
+
+	gw.Address = ch.GetAddress()
+	gw.MatchScope = ch.GetMatchScope()
+
+	if namespaces := ch.GetMatchNamespaces(); len(namespaces) > 0 {
+		gw.MatchNamespaces = make(map[string]struct{}, len(namespaces))
+		for _, ns := range namespaces {
+			gw.MatchNamespaces[ns] = struct{}{}
+		}
+	}
+
+	if hosts := ch.GetMatchHosts(); len(hosts) > 0 {
+		gw.MatchHosts = make(map[string]struct{}, len(hosts))
+		for _, host := range hosts {
+			gw.MatchHosts[host] = struct{}{}
+		}
+	}
+
+	if labels := ch.GetMatchLabels(); len(labels) > 0 {
+		gw.MatchLabels = make(map[string]string, len(labels))
+		for k, v := range labels {
+			gw.MatchLabels[k] = v
+		}
+	}
+
+	return gw
+}
+
+// DumpGatewayToChannelData serializes Gateway into protobuf protocol.ChannelData.
+// Matches C++ node::dump_gateway_to_channel_data.
+func DumpGatewayToChannelData(gw Gateway, ch *protocol.ChannelData) {
+	if ch == nil {
+		return
+	}
+
+	ch.Address = gw.Address
+	ch.MatchScope = gw.MatchScope
+
+	if len(gw.MatchNamespaces) > 0 {
+		namespaces := make([]string, 0, len(gw.MatchNamespaces))
+		for ns := range gw.MatchNamespaces {
+			namespaces = append(namespaces, ns)
+		}
+		sort.Strings(namespaces)
+		ch.MatchNamespaces = namespaces
+	} else {
+		ch.MatchNamespaces = nil
+	}
+
+	if len(gw.MatchHosts) > 0 {
+		hosts := make([]string, 0, len(gw.MatchHosts))
+		for host := range gw.MatchHosts {
+			hosts = append(hosts, host)
+		}
+		sort.Strings(hosts)
+		ch.MatchHosts = hosts
+	} else {
+		ch.MatchHosts = nil
+	}
+
+	if len(gw.MatchLabels) > 0 {
+		ch.MatchLabels = make(map[string]string, len(gw.MatchLabels))
+		for k, v := range gw.MatchLabels {
+			ch.MatchLabels[k] = v
+		}
+	} else {
+		ch.MatchLabels = nil
+	}
+}
+
 type NodeConfigure struct {
 	EventLoopContext context.Context
 
@@ -27,11 +154,18 @@ type NodeConfigure struct {
 	ProtocolVersion        int32
 	ProtocolMinimalVersion int32
 
+	// ===== 部署集群配置，影响连接地址的可用性 =====
+	Scope         string
+	NamespaceName string
+	NodeLabels    map[string]string
+	Gateway       []Gateway
+
 	// ===== 连接配置 =====
 	BackLog              int32
 	FirstIdleTimeout     time.Duration // 第一个包允许的空闲时间
 	PingInterval         time.Duration // ping包间隔
 	RetryInterval        time.Duration // 重试包间隔
+	MaxRetryInterval     time.Duration // 最大重试包间隔
 	FaultTolerant        uint32        // 容错次数（次）
 	AccessTokenMaxNumber uint32        // 最大 access token 数量，请不要设置的太大，验证次数最大可能是 N^2
 	AccessTokens         [][]byte      // access token 列表
@@ -70,9 +204,18 @@ func SetDefaultNodeConfigure(conf *NodeConfigure) {
 	conf.ProtocolVersion = int32(protocol.ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_VERSION)
 	conf.ProtocolMinimalVersion = int32(protocol.ATBUS_PROTOCOL_CONST_ATBUS_PROTOCOL_MINIMAL_VERSION)
 
+	conf.Scope = ""
+	conf.NamespaceName = ""
+	clear(conf.NodeLabels)
+	if conf.Gateway != nil {
+		clear(conf.Gateway)
+		conf.Gateway = conf.Gateway[:0]
+	}
+
 	conf.FirstIdleTimeout = 30 * time.Second
 	conf.PingInterval = 8 * time.Second
 	conf.RetryInterval = 3 * time.Second
+	conf.MaxRetryInterval = 60 * time.Second
 	conf.FaultTolerant = 2 // 允许最多失败2次，第3次直接失败，默认配置里3次ping包无响应则是最多24s可以发现节点下线
 	conf.BackLog = 256
 	conf.AccessTokenMaxNumber = 5

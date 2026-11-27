@@ -39,7 +39,7 @@ func setupNodeWithChild(t *testing.T, nodeId, childId types.BusIdType) (*Node, *
 	ret = n.AddEndpoint(ep)
 	require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ret)
 
-	conn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	conn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, conn)
 	conn.setStatus(types.ConnectionState_Connected)
 	require.True(t, ep.AddConnection(conn, false))
@@ -143,7 +143,7 @@ func TestGetPeerChannel_UpstreamBlacklisted_FallbackToUpstreamBlocked(t *testing
 	require.NotNil(t, upstreamEp)
 	n.upstream.node = upstreamEp
 
-	upConn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	upConn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, upConn)
 	upConn.setStatus(types.ConnectionState_Connected)
 	upstreamEp.AddConnection(upConn, false)
@@ -172,7 +172,7 @@ func TestGetPeerChannel_UpstreamBlacklisted_UnknownTargetReturnsInvalidId(t *tes
 	require.NotNil(t, upstreamEp)
 	n.upstream.node = upstreamEp
 
-	upConn := CreateConnection(&n, "ipv4://127.0.0.1:0")
+	upConn := CreateConnection(&n, "ipv4://127.0.0.1:0", false)
 	require.NotNil(t, upConn)
 	upConn.setStatus(types.ConnectionState_Connected)
 	upstreamEp.AddConnection(upConn, false)

@@ -58,6 +58,10 @@ func MakeAddress(in string) (*ChannelAddress, bool) {
 
 	// Find the last colon for port (must be after "://")
 	rest := in[schemeEnd+3:]
+	if addr.Scheme == "unix" || addr.Scheme == "pipe" {
+		addr.Host = rest
+		return addr, true
+	}
 	portStart := strings.LastIndex(rest, ":")
 
 	addr.Port = 0
