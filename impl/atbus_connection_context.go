@@ -1622,15 +1622,11 @@ func (cc *ConnectionContext) HandshakeReadPeerKey(peerPubKey *protocol.CryptoHan
 	kdf := NegotiateKDF(cc.supportedKDFTypes, peerKDFs)
 	cc.cryptoSelectKdfType = kdf
 
-	// The initiator's offer determines preference. C++ responders may send
-	// their whole allowlist in the response instead of just the selected cipher.
-	preferred, allowed := supportedCryptoAlgorithms, peerAlgorithms
-	if needConfirm {
-		preferred, allowed = peerAlgorithms, supportedCryptoAlgorithms
-	}
+	// The responder selects in its configured order. An initiator accepts the
+	// selection, or uses its offer order for legacy C++ replies with a full list.
 	algorithm := protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE
-	for _, candidate := range preferred {
-		if candidate != protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE && slices.Contains(allowed, candidate) {
+	for _, candidate := range supportedCryptoAlgorithms {
+		if candidate != protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE && slices.Contains(peerAlgorithms, candidate) {
 			algorithm = candidate
 			break
 		}
@@ -1937,6 +1933,10 @@ func (cc *ConnectionContext) PackMessage(m *types.Message, protocolVersion int32
 	head := m.MutableHead()
 	head.Version = protocolVersion
 	head.BodySize = uint64(bodySize)
+	head.Compression = nil
+	if cryptoAlg == protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_NONE {
+		head.Crypto = nil
+	}
 
 	// If no compression and no encryption, use simple packing
 	if compressionAlg == protocol.ATBUS_COMPRESSION_ALGORITHM_TYPE_ATBUS_COMPRESSION_ALGORITHM_NONE &&
@@ -2042,13 +2042,12 @@ func (cc *ConnectionContext) packMessageWith(m *types.Message, compressionAlg pr
 			return nil, error_code.EN_ATBUS_ERR_CRYPTO_ALGORITHM_NOT_MATCH
 		}
 
-		// Set crypto info in head (preserve existing AAD if already set)
-		if head.Crypto == nil {
-			head.Crypto = &protocol.MessageHeadCrypto{}
-		}
-		head.Crypto.Algorithm = cryptoAlg
+		// Preserve caller-supplied AAD for AEAD and build fresh wire metadata.
+		aad := head.GetCrypto().GetAad()
+		head.Crypto = &protocol.MessageHeadCrypto{Algorithm: cryptoAlg}
 
 		if cryptoAlgorithmIsAEAD(cryptoAlg) {
+			head.Crypto.Aad = aad
 			nonceSize := cryptoAlgorithmIVSize(cryptoAlg)
 			iv := make([]byte, nonceSize)
 			if _, err := rand.Read(iv); err != nil {
@@ -2076,7 +2075,6 @@ func (cc *ConnectionContext) packMessageWith(m *types.Message, compressionAlg pr
 				}
 				processedBody = encrypted
 			} else {
-				head.Crypto.Iv = nil
 				encrypted, err := cc.writeCrypto.Encrypt(processedBody)
 				if err != nil {
 					return nil, error_code.EN_ATBUS_ERR_CRYPTO_ENCRYPT

@@ -1388,7 +1388,37 @@ func TestConnectionContextPackUnpackMessageWithCryptoAndCompression(t *testing.T
 	// Assert
 	assert.Equal(t, msg.GetHead().GetSourceBusId(), unpacked.GetHead().GetSourceBusId())
 	assert.Equal(t, testData, unpacked.GetBody().GetDataTransformReq().GetContent())
-	assert.NotNil(t, unpacked.GetHead().GetCompression())
+	require.NotNil(t, unpacked.GetHead().GetCompression())
+	require.NotNil(t, unpacked.GetHead().GetCrypto())
+
+	t.Run("RepackWithoutTransforms", func(t *testing.T) {
+		nextHop := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE)
+		frame, code := nextHop.PackMessage(unpacked, 3, 65536)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+
+		delivered := types.NewMessage()
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, nextHop.UnpackMessage(delivered, frame.UsedSpan(), 65536))
+		assert.Nil(t, delivered.GetHead().GetCrypto())
+		assert.Nil(t, delivered.GetHead().GetCompression())
+		assert.Equal(t, testData, delivered.GetBody().GetDataTransformReq().GetContent())
+	})
+
+	t.Run("RepackWithEncryptionOnly", func(t *testing.T) {
+		received := types.NewMessage()
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, ctx.UnpackMessage(received, packed.UsedSpan(), 65536))
+
+		nextHop := NewConnectionContext(protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, nextHop.SetupCryptoWithKey(
+			protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM, key[:16], iv))
+		frame, code := nextHop.PackMessage(received, 3, 65536)
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, code)
+
+		delivered := types.NewMessage()
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, nextHop.UnpackMessage(delivered, frame.UsedSpan(), 65536))
+		assert.Equal(t, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM, delivered.GetHead().GetCrypto().GetAlgorithm())
+		assert.Nil(t, delivered.GetHead().GetCompression())
+		assert.Equal(t, testData, delivered.GetBody().GetDataTransformReq().GetContent())
+	})
 }
 
 func TestConnectionContextPackMessageWhenClosing(t *testing.T) {
@@ -3177,6 +3207,41 @@ func TestConnectionContextHandshakeWriteSelfPublicKey(t *testing.T) {
 
 		// Assert
 		assert.Equal(t, error_code.EN_ATBUS_ERR_CHANNEL_CLOSING, errCode)
+	})
+}
+
+func TestConnectionContextCipherPreference(t *testing.T) {
+	aes128 := protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM
+	aes256 := protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM
+	clientAlgorithms := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{aes256, aes128}
+	serverAlgorithms := []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{aes128, aes256}
+	keyExchange := protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_SECP256R1
+
+	t.Run("ResponderOrder", func(t *testing.T) {
+		client, server := NewConnectionContext(keyExchange), NewConnectionContext(keyExchange)
+		offer, reply := &protocol.CryptoHandshakeData{}, &protocol.CryptoHandshakeData{}
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeGenerateSelfKey(0))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeWriteSelfPublicKey(offer, clientAlgorithms))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeGenerateSelfKey(offer.GetSequence()))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeReadPeerKey(offer, serverAlgorithms, true))
+		require.Equal(t, aes128, server.GetCryptoSelectAlgorithm())
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeWriteSelfPublicKey(reply, []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{aes128}))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeReadPeerKey(reply, clientAlgorithms, false))
+		require.Equal(t, aes128, client.GetCryptoSelectAlgorithm())
+	})
+
+	t.Run("LegacyResponderAllowlist", func(t *testing.T) {
+		client, server := NewConnectionContext(keyExchange), NewConnectionContext(keyExchange)
+		offer, reply := &protocol.CryptoHandshakeData{}, &protocol.CryptoHandshakeData{}
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeGenerateSelfKey(0))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeWriteSelfPublicKey(offer, clientAlgorithms))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeGenerateSelfKey(offer.GetSequence()))
+		// The old responder selects from the client's order and writes its own full list.
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeReadPeerKey(offer, clientAlgorithms, true))
+		require.Equal(t, aes256, server.GetCryptoSelectAlgorithm())
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, server.HandshakeWriteSelfPublicKey(reply, serverAlgorithms))
+		require.Equal(t, error_code.EN_ATBUS_ERR_SUCCESS, client.HandshakeReadPeerKey(reply, clientAlgorithms, false))
+		require.Equal(t, aes256, client.GetCryptoSelectAlgorithm())
 	})
 }
 

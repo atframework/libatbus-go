@@ -40,6 +40,10 @@ Implementation: `impl/atbus_connection_context.go`
 4. **Client** sends `handshake_confirm` to signal cipher switch
 5. **Server** switches `receive_cipher` upon confirm receipt
 
+The responder selects the first common cipher in its configured order and sends the selection in the register or pong response. Clients apply their own offer order when reading a legacy C++ responder's full allowlist. The default order matches libatbus and starts with AES-128-GCM, followed by the other AES suites before the ChaCha20 family. XXTEA requires explicit configuration.
+
+When forwarding, pack using the outbound connection's crypto and compression state. The received hop's metadata does not describe the outbound frame.
+
 ### Key Refresh
 
 Default interval: 3 hours (`CryptoKeyRefreshInterval`). Periodic re-handshake via ping/pong cycle.

@@ -228,21 +228,18 @@ func SetDefaultNodeConfigure(conf *NodeConfigure) {
 	// 加密算法
 	conf.CryptoKeyExchangeType = protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_NONE
 	conf.CryptoKeyRefreshInterval = 3 * time.Hour
-	if conf.CryptoAllowAlgorithms != nil {
-		clear(conf.CryptoAllowAlgorithms)
-		conf.CryptoAllowAlgorithms = conf.CryptoAllowAlgorithms[:0]
-	} else {
-		conf.CryptoAllowAlgorithms = make([]protocol.ATBUS_CRYPTO_ALGORITHM_TYPE, 0, 1)
-	}
-
-	var zeroCryptoAlgs protocol.ATBUS_CRYPTO_ALGORITHM_TYPE
-	cryptoAlgs := zeroCryptoAlgs.Descriptor().Values()
-	for i := 0; i < cryptoAlgs.Len(); i++ {
-		if cryptoAlgs.Get(i).Number() == 0 {
-			continue
-		}
-		conf.CryptoAllowAlgorithms = append(conf.CryptoAllowAlgorithms, protocol.ATBUS_CRYPTO_ALGORITHM_TYPE(cryptoAlgs.Get(i).Number()))
-	}
+	// Keep the preference order in sync with libatbus. XXTEA requires explicit configuration.
+	conf.CryptoAllowAlgorithms = append(conf.CryptoAllowAlgorithms[:0],
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20,
+	)
 
 	// 压缩算法
 	if conf.CompressionAllowAlgorithms != nil {

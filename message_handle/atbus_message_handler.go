@@ -662,6 +662,8 @@ func forwardDataMessage(n types.Node, m *Message, fromServerId types.BusIdType, 
 
 	head := m.MutableHead()
 	head.SourceBusId = uint64(n.GetId())
+	// Reusing the received envelope must not carry its AAD into the next hop.
+	head.Crypto = nil
 
 	return SendMessage(n, targetConn, m), targetEp
 }

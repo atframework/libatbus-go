@@ -606,6 +606,25 @@ func TestNodeMsgParity_CryptoConfigComprehensiveMatrix(t *testing.T) {
 	assert.Equal(t, 0, failedCount, "No combination should fail")
 }
 
+func TestNodeMsgDefaultCryptoPrefersAES(t *testing.T) {
+	var conf types.NodeConfigure
+	types.SetDefaultNodeConfigure(&conf)
+	require.Equal(t, []protocol.ATBUS_CRYPTO_ALGORITHM_TYPE{
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_GCM,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_256_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_192_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_AES_128_CBC,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_XCHACHA20_POLY1305_IETF,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20_POLY1305_IETF,
+		protocol.ATBUS_CRYPTO_ALGORITHM_TYPE_ATBUS_CRYPTO_ALGORITHM_CHACHA20,
+	}, conf.CryptoAllowAlgorithms)
+	require.True(t, testEncryptedMessageBetweenPeerNodes(t,
+		protocol.ATBUS_CRYPTO_KEY_EXCHANGE_TYPE_ATBUS_CRYPTO_KEY_EXCHANGE_X25519,
+		conf.CryptoAllowAlgorithms, "Encrypted using the default cipher preference"))
+}
+
 // TestNodeMsgParity_CryptoConfigMultipleAlgorithms mirrors C++ atbus_node_msg::crypto_config_multiple_algorithms.
 // Tests with multiple allowed cipher algorithms configured (algorithm negotiation).
 func TestNodeMsgParity_CryptoConfigMultipleAlgorithms(t *testing.T) {
